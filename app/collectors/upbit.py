@@ -9,8 +9,18 @@ UPBIT_URL = "https://api.upbit.com/v1/ticker"
 DEFAULT_MARKETS = ["KRW-BTC", "KRW-ETH", "KRW-XRP", "KRW-SOL", "KRW-DOGE"]
 
 
+def _normalize_market(symbol: str) -> str:
+    value = (symbol or "").strip().upper()
+    if not value:
+        return value
+    if "-" in value:
+        return value
+    return f"KRW-{value}"
+
+
 async def collect(job_id: str, symbols: list[str] | None = None) -> int:
-    markets = symbols or DEFAULT_MARKETS
+    raw_markets = symbols or DEFAULT_MARKETS
+    markets = [_normalize_market(symbol) for symbol in raw_markets]
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.get(UPBIT_URL, params={"markets": ",".join(markets)})
         resp.raise_for_status()
