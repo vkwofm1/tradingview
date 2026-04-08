@@ -80,6 +80,16 @@ def build_mcp() -> FastMCP:
         return db.query_market_data(collector, symbol, limit)
 
     @mcp.tool()
+    def query_market_candles(
+        collector: str | None = None,
+        symbol: str | None = None,
+        interval: str | None = "1m",
+        limit: int = 60,
+    ) -> list[dict]:
+        """Query stored candle records, optionally filtered by collector / symbol / interval."""
+        return db.query_market_candles(collector, symbol, interval, limit)
+
+    @mcp.tool()
     def list_jobs(limit: int = 20) -> list[dict]:
         """Return the most recent collection jobs."""
         return db.list_jobs(limit)

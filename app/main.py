@@ -101,6 +101,16 @@ def query_data(
     return db.query_market_data(collector, symbol, limit)
 
 
+@app.get("/candles")
+def query_candles(
+    collector: str | None = None,
+    symbol: str | None = None,
+    interval: str | None = Query("1m"),
+    limit: int = Query(60, ge=1, le=500),
+):
+    return db.query_market_candles(collector, symbol, interval, limit)
+
+
 if __name__ == "__main__":
     import uvicorn
 
