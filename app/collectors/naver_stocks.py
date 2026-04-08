@@ -13,7 +13,7 @@ import httpx
 from app import db
 
 RANKING_URL = "https://m.stock.naver.com/api/stocks/marketValue/KOSPI"
-QUOTE_URL = "https://m.stock.naver.com/api/stock/{code}/integration"
+QUOTE_URL = "https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:{code}|SERVICE_RECENT_ITEM:{code}&_callback="
 
 # Fallback if the ranking endpoint is unreachable.
 FALLBACK_SYMBOLS = ["005930", "000660", "035420", "035720", "005380"]
@@ -51,25 +51,36 @@ async def _fetch_top_kospi(client: httpx.AsyncClient, page_size: int = 100) -> l
     return codes or list(FALLBACK_SYMBOLS)
 
 
-async def _fetch_quote(client: httpx.AsyncClient, code: str) -> dict:
+async def _fetch_quote(client: httpx.AsyncClient, code: str) -> dict | None:
     """Fetch single-stock quote payload."""
     resp = await client.get(QUOTE_URL.format(code=code))
     resp.raise_for_status()
-    data = resp.json()
+    body = resp.json()
+    result = body.get("result") or {}
+    areas = result.get("areas") or []
+    item = None
+    for area in areas:
+        datas = area.get("datas") or []
+        if datas:
+            item = datas[0]
+            break
 
-    exchange = data.get("stockExchangeType") or {}
-    if not isinstance(exchange, dict):
-        exchange = {}
+    if not item:
+        return None
+
+    current_price = item.get("nv")
+    if current_price is None:
+        return None
 
     return {
-        "name": data.get("stockName"),
+        "name": item.get("nm"),
         "code": code,
-        "current_price": data.get("closePrice"),
-        "change": data.get("compareToPreviousClosePrice"),
-        "change_rate": data.get("fluctuationsRatio"),
-        "volume": data.get("accumulatedTradingVolume"),
-        "market": exchange.get("code") or exchange.get("name"),
-        "trade_date": data.get("localTradedAt"),
+        "current_price": current_price,
+        "change": item.get("cv"),
+        "change_rate": item.get("cr"),
+        "volume": item.get("aq"),
+        "market": "KRX",
+        "trade_date": item.get("ms"),
     }
 
 
@@ -87,7 +98,8 @@ async def collect(job_id: str, symbols: list[str] | None = None) -> int:
             async with sem:
                 try:
                     payload = await _fetch_quote(client, code)
-                    results.append((code, payload))
+                    if payload is not None:
+                        results.append((code, payload))
                 except Exception as exc:
                     results.append((code, {"error": str(exc), "code": code}))
 
