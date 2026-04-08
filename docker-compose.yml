@@ -1,0 +1,19 @@
+services:
+  crawl:
+    build: .
+    ports:
+      - "8509:8509"
+    volumes:
+      - crawl-data:/app/data
+    environment:
+      DB_PATH: /app/data/data.db
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8509/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  crawl-data:

@@ -7,7 +7,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-DB_PATH = Path("data.db")
+import os
+
+DB_PATH = Path(os.environ.get("DB_PATH", "data.db"))
 
 _local = threading.local()
 
