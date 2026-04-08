@@ -8,21 +8,39 @@ from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 
 from app import db
-from app.collectors import crypto, stocks
+from app.collectors import bithumb, crypto, naver_stocks, stocks, upbit
+from app.mcp_server import build_mcp
+from app.runner import run_collector
+from app.scheduler import Scheduler
 
 COLLECTORS = {
     "crypto": crypto.collect,
     "stocks": stocks.collect,
+    "naver_stocks": naver_stocks.collect,
+    "upbit": upbit.collect,
+    "bithumb": bithumb.collect,
 }
+
+mcp = build_mcp()
+mcp_app = mcp.streamable_http_app()
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     db.init_db()
-    yield
+    scheduler = Scheduler(COLLECTORS)
+    await scheduler.start()
+    # MCP session manager must be running for the mounted streamable-HTTP
+    # transport to handle requests. We enter its lifespan here.
+    async with mcp.session_manager.run():
+        try:
+            yield
+        finally:
+            await scheduler.stop()
 
 
-app = FastAPI(title="TradingView Crawl", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="TradingView Crawl", version="0.2.0", lifespan=lifespan)
+app.mount("/mcp", mcp_app)
 
 
 class CollectRequest(BaseModel):
@@ -51,6 +69,14 @@ async def start_collection(req: CollectRequest):
 
     asyncio.create_task(_run())
     return job
+
+
+@app.post("/collect/sync")
+async def start_collection_sync(req: CollectRequest):
+    """Run a collector synchronously and return the completed job."""
+    if req.collector not in COLLECTORS:
+        raise HTTPException(400, f"Unknown collector: {req.collector}. Available: {list(COLLECTORS)}")
+    return await run_collector(req.collector, COLLECTORS[req.collector], req.symbols)
 
 
 @app.get("/jobs")
