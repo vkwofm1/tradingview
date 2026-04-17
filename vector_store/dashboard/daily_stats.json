@@ -1,0 +1,29 @@
+[
+  {
+    "date": "2026-04-08",
+    "impressions": 10000,
+    "clicks": 820,
+    "orders": 320,
+    "revenue": 18000000,
+    "ad_cost": 2200000,
+    "cogs": 10500000
+  },
+  {
+    "date": "2026-04-09",
+    "impressions": 12000,
+    "clicks": 1010,
+    "orders": 360,
+    "revenue": 20000000,
+    "ad_cost": 2500000,
+    "cogs": 11800000
+  },
+  {
+    "date": "2026-04-10",
+    "impressions": 9000,
+    "clicks": 770,
+    "orders": 300,
+    "revenue": 17000000,
+    "ad_cost": 2000000,
+    "cogs": 9900000
+  }
+]

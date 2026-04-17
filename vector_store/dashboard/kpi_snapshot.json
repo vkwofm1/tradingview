@@ -1,0 +1,52 @@
+{
+  "summary": {
+    "daily_stats_rows": 3,
+    "transactions_rows": 10,
+    "impressions": 31000,
+    "orders": 980,
+    "revenue": 55000000.0,
+    "ad_cost": 6700000.0,
+    "cogs": 32200000.0,
+    "profit": 16100000.0
+  },
+  "kpis": {
+    "profit_rate_pct": 29.27,
+    "conversion_rate_pct": 3.16,
+    "average_margin_rate_pct": 41.45,
+    "average_margin_multiple_x": 1.71,
+    "category_mix": [
+      {
+        "category": "전문공구",
+        "revenue": 20000000.0,
+        "share_pct": 36.36
+      },
+      {
+        "category": "생활용품",
+        "revenue": 10000000.0,
+        "share_pct": 18.18
+      },
+      {
+        "category": "홈인테리어",
+        "revenue": 9000000.0,
+        "share_pct": 16.36
+      },
+      {
+        "category": "캠핑용품",
+        "revenue": 8000000.0,
+        "share_pct": 14.55
+      },
+      {
+        "category": "반려동물용품",
+        "revenue": 8000000.0,
+        "share_pct": 14.55
+      }
+    ]
+  },
+  "credentials": {
+    "available": false,
+    "missing": [
+      "NAVER_CLIENT_ID",
+      "NAVER_CLIENT_SECRET"
+    ]
+  }
+}

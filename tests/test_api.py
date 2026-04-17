@@ -1,6 +1,5 @@
-"""Tests for the core API surface, collectors, scheduler, and MCP server."""
-
 import asyncio
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
@@ -43,6 +42,104 @@ def test_health(client):
     resp = client.get("/health")
     assert resp.status_code == 200
     assert resp.json()["status"] == "ok"
+
+
+def test_operations_dashboard_reports_api_checks_and_failure_alerts(client):
+    for index in range(8):
+        job_id = f"crypto-ok-{index}"
+        db.create_job(job_id, "crypto")
+        db.finish_job(job_id, 1)
+
+    for index in range(2):
+        job_id = f"naver-fail-{index}"
+        db.create_job(job_id, "naver_stocks")
+        db.finish_job(job_id, 0, "schema mismatch")
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get("https://api.coingecko.com/api/v3/ping").mock(
+            return_value=httpx.Response(200, json={"gecko_says": "(V3) To the Moon!"})
+        )
+        mock.get("https://query1.finance.yahoo.com/v8/finance/chart/AAPL").mock(
+            return_value=httpx.Response(
+                200,
+                json={"chart": {"result": [{"meta": {"symbol": "AAPL"}}]}},
+            )
+        )
+        mock.get(
+            "https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:005930|SERVICE_RECENT_ITEM:005930&_callback="
+        ).mock(
+            return_value=httpx.Response(
+                200,
+                json={"result": {"areas": [{"datas": [{}]}]}},
+            )
+        )
+        mock.get("https://api.upbit.com/v1/candles/minutes/1").mock(
+            return_value=httpx.Response(
+                200,
+                json=[{"trade_price": 100000000, "candle_date_time_utc": "2026-04-10T10:00:00"}],
+            )
+        )
+        mock.get("https://api.bithumb.com/public/candlestick/BTC_KRW/1m").mock(
+            return_value=httpx.Response(200, json={"status": "0000", "data": []})
+        )
+
+        resp = client.get("/dashboard/operations", params={"failure_rate_threshold_pct": 10})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["summary"]["api_count"] == 5
+    assert body["summary"]["degraded_apis"] == 1
+    assert body["summary"]["collectors_over_failure_threshold"] == 1
+
+    apis = {item["collector"]: item for item in body["apis"]}
+    assert apis["crypto"]["status"] == "healthy"
+    assert apis["naver_stocks"]["status"] == "degraded"
+    assert apis["naver_stocks"]["schema_status"] == "changed"
+    assert "result.areas.0.datas.0.nv" in apis["naver_stocks"]["missing_paths"]
+
+    rates = {item["collector"]: item for item in body["job_failure_rates"]}
+    assert rates["naver_stocks"]["failure_rate_pct"] == 100.0
+    assert rates["naver_stocks"]["alert"] is True
+
+    alert_codes = {item["code"] for item in body["alerts"]}
+    assert "api_schema_changed" in alert_codes
+    assert "job_failure_rate_high" in alert_codes
+
+
+def test_api_health_endpoint_surfaces_upstream_failure(client):
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get("https://api.coingecko.com/api/v3/ping").mock(
+            return_value=httpx.Response(200, json={"gecko_says": "(V3) To the Moon!"})
+        )
+        mock.get("https://query1.finance.yahoo.com/v8/finance/chart/AAPL").mock(
+            return_value=httpx.Response(
+                200,
+                json={"chart": {"result": [{"meta": {"symbol": "AAPL"}}]}},
+            )
+        )
+        mock.get(
+            "https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:005930|SERVICE_RECENT_ITEM:005930&_callback="
+        ).mock(
+            return_value=httpx.Response(
+                200,
+                json={"result": {"areas": [{"datas": [{"nv": "75000"}]}]}},
+            )
+        )
+        mock.get("https://api.upbit.com/v1/candles/minutes/1").mock(
+            return_value=httpx.Response(503, json={"error": "down"})
+        )
+        mock.get("https://api.bithumb.com/public/candlestick/BTC_KRW/1m").mock(
+            return_value=httpx.Response(200, json={"status": "0000", "data": []})
+        )
+
+        resp = client.get("/health/apis")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "degraded"
+    apis = {item["collector"]: item for item in body["apis"]}
+    assert apis["upbit"]["status"] == "failing"
+    assert any(item["code"] == "api_unreachable" and item["collector"] == "upbit" for item in body["alerts"])
 
 
 def test_collect_unknown_collector(client):
@@ -92,6 +189,74 @@ def test_get_job_not_found(client):
     assert resp.status_code == 404
 
 
+def test_risk_dashboard_summarizes_collector_health_and_alerts(client):
+    now = datetime.now(timezone.utc)
+
+    db.create_job("job-crypto", "crypto")
+    db.insert_market_data(
+        "job-crypto",
+        "crypto",
+        "BTC",
+        {"usd": 95000, "usd_market_cap": 1_800_000_000_000},
+    )
+    db.insert_market_data(
+        "job-crypto",
+        "crypto",
+        "ETH",
+        {"usd": 3200, "usd_market_cap": 400_000_000_000},
+    )
+    db.finish_job("job-crypto", 2)
+
+    db.create_job("job-upbit", "upbit")
+    for index, price in enumerate((100.0, 110.0, 90.0), start=1):
+        db.insert_market_candle(
+            "job-upbit",
+            "upbit",
+            "KRW-BTC",
+            "1m",
+            (now - timedelta(minutes=3 - index)).isoformat(),
+            {"trade_price": price},
+        )
+    db.finish_job("job-upbit", 3)
+
+    db.create_job("job-naver", "naver_stocks")
+    db.finish_job("job-naver", 0, "upstream timeout")
+
+    stale_time = (now - timedelta(hours=3)).isoformat()
+    conn = db._conn()
+    conn.execute(
+        "UPDATE jobs SET created_at=?, finished_at=? WHERE id=?",
+        (stale_time, stale_time, "job-naver"),
+    )
+    conn.commit()
+
+    resp = client.get("/dashboard/risk", params={"stale_after_sec": 3600, "drawdown_alert_pct": 5})
+    assert resp.status_code == 200
+    body = resp.json()
+
+    assert body["overview"]["collector_count"] == 3
+    assert body["overview"]["healthy_collectors"] == 2
+    assert body["overview"]["failing_collectors"] == 1
+    assert body["overview"]["alert_count"] >= 2
+
+    collectors = {item["collector"]: item for item in body["collectors"]}
+    assert collectors["crypto"]["health"] == "healthy"
+    assert collectors["naver_stocks"]["health"] == "failing"
+
+    concentration = body["concentration"]
+    assert concentration[0]["symbol"] == "BTC"
+    assert concentration[0]["weight_pct"] > concentration[1]["weight_pct"]
+
+    price_risk = {item["symbol"]: item for item in body["price_risk"]}
+    assert round(price_risk["KRW-BTC"]["current_price"], 2) == 90.0
+    assert price_risk["KRW-BTC"]["max_drawdown_pct_1h"] > 18.0
+
+    alert_codes = {item["code"] for item in body["alerts"]}
+    assert "collector_failed" in alert_codes
+    assert "drawdown_breach" in alert_codes
+    assert len(body["integration_gaps"]) >= 1
+
+
 # ---------------------------------------------------------------------------
 # New collector tests (respx-mocked HTTP)
 # ---------------------------------------------------------------------------
@@ -100,72 +265,78 @@ def test_get_job_not_found(client):
 @pytest.mark.asyncio
 async def test_upbit_collect_with_respx():
     with respx.mock(assert_all_called=True) as mock:
-        mock.get("https://api.upbit.com/v1/ticker").mock(
+        mock.get(
+            "https://api.upbit.com/v1/candles/minutes/1",
+            params={"market": "KRW-BTC", "count": 60},
+        ).mock(
             return_value=httpx.Response(
                 200,
                 json=[
-                    {"market": "KRW-BTC", "trade_price": 100000000, "change_rate": 0.01},
-                    {"market": "KRW-ETH", "trade_price": 5000000, "change_rate": -0.02},
+                    {"market": "KRW-BTC", "trade_price": 100000000, "candle_date_time_utc": "2026-04-10T10:00:00"},
+                    {"market": "KRW-BTC", "trade_price": 100100000, "candle_date_time_utc": "2026-04-10T10:01:00"},
+                ],
+            )
+        )
+        mock.get(
+            "https://api.upbit.com/v1/candles/minutes/1",
+            params={"market": "KRW-ETH", "count": 60},
+        ).mock(
+            return_value=httpx.Response(
+                200,
+                json=[
+                    {"market": "KRW-ETH", "trade_price": 5000000, "candle_date_time_utc": "2026-04-10T10:00:00"},
+                    {"market": "KRW-ETH", "trade_price": 5100000, "candle_date_time_utc": "2026-04-10T10:01:00"},
                 ],
             )
         )
         count = await upbit.collect("job-upbit", ["KRW-BTC", "KRW-ETH"])
 
-    assert count == 2
-    rows = db.query_market_data("upbit", "KRW-BTC", 5)
-    assert len(rows) == 1
-    assert rows[0]["payload"]["trade_price"] == 100000000
+    assert count == 4
+    rows = db.query_market_candles("upbit", "KRW-BTC", "1m", 5)
+    assert len(rows) == 2
+    assert rows[0]["payload"]["trade_price"] == 100100000
 
 
 @pytest.mark.asyncio
 async def test_bithumb_collect_with_respx():
     with respx.mock(assert_all_called=True) as mock:
-        mock.get("https://api.bithumb.com/public/ticker/ALL_KRW").mock(
+        mock.get("https://api.bithumb.com/public/candlestick/BTC_KRW/1m").mock(
             return_value=httpx.Response(
                 200,
                 json={
                     "status": "0000",
-                    "data": {
-                        "BTC": {
-                            "closing_price": "100000000",
-                            "opening_price": "98000000",
-                            "max_price": "101000000",
-                            "min_price": "97000000",
-                            "units_traded_24H": "100",
-                            "acc_trade_value_24H": "9999",
-                            "fluctate_rate_24H": "1.5",
-                            "fluctate_24H": "1500000",
-                        },
-                        "ETH": {
-                            "closing_price": "5000000",
-                            "opening_price": "4900000",
-                            "max_price": "5100000",
-                            "min_price": "4800000",
-                            "units_traded_24H": "200",
-                            "acc_trade_value_24H": "8888",
-                            "fluctate_rate_24H": "2.0",
-                            "fluctate_24H": "100000",
-                        },
-                        "DOGE_NOT_REQUESTED": {"closing_price": "0"},
-                        "date": "1717000000",
-                    },
+                    "data": [
+                        [1717000000000, "98000000", "100000000", "101000000", "97000000", "100"],
+                        [1717000060000, "100000000", "100500000", "101500000", "99500000", "110"],
+                    ],
+                },
+            )
+        )
+        mock.get("https://api.bithumb.com/public/candlestick/ETH_KRW/1m").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "status": "0000",
+                    "data": [
+                        [1717000000000, "4900000", "5000000", "5100000", "4800000", "200"],
+                        [1717000060000, "5000000", "5050000", "5150000", "4950000", "210"],
+                    ],
                 },
             )
         )
         count = await bithumb.collect("job-bithumb", ["BTC", "ETH"])
 
-    # Only BTC + ETH (DOGE_NOT_REQUESTED is filtered out, "date" key skipped).
-    assert count == 2
-    rows = db.query_market_data("bithumb", "BTC", 5)
-    assert len(rows) == 1
-    assert rows[0]["payload"]["closing_price"] == "100000000"
-    assert rows[0]["payload"]["date"] == "1717000000"
+    assert count == 4
+    rows = db.query_market_candles("bithumb", "BTC", "1m", 5)
+    assert len(rows) == 2
+    assert rows[0]["payload"]["close"] == "100500000"
+    assert rows[0]["payload"]["symbol"] == "BTC"
 
 
 @pytest.mark.asyncio
 async def test_bithumb_collect_api_error_raises():
     with respx.mock() as mock:
-        mock.get("https://api.bithumb.com/public/ticker/ALL_KRW").mock(
+        mock.get("https://api.bithumb.com/public/candlestick/BTC_KRW/1m").mock(
             return_value=httpx.Response(200, json={"status": "5500", "message": "down"})
         )
         with pytest.raises(RuntimeError, match="Bithumb API error"):
@@ -175,31 +346,53 @@ async def test_bithumb_collect_api_error_raises():
 @pytest.mark.asyncio
 async def test_naver_collect_with_explicit_symbols():
     with respx.mock(assert_all_called=True) as mock:
-        mock.get("https://m.stock.naver.com/api/stock/005930/integration").mock(
+        mock.get(
+            "https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:005930|SERVICE_RECENT_ITEM:005930&_callback="
+        ).mock(
             return_value=httpx.Response(
                 200,
                 json={
-                    "stockName": "삼성전자",
-                    "closePrice": "75000",
-                    "compareToPreviousClosePrice": "1000",
-                    "fluctuationsRatio": "1.35",
-                    "accumulatedTradingVolume": "12345678",
-                    "stockExchangeType": {"code": "KOSPI", "name": "코스피"},
-                    "localTradedAt": "2026-04-08T15:30:00+09:00",
+                    "result": {
+                        "areas": [
+                            {
+                                "datas": [
+                                    {
+                                        "nm": "삼성전자",
+                                        "nv": "75000",
+                                        "cv": "1000",
+                                        "cr": "1.35",
+                                        "aq": "12345678",
+                                        "ms": "2026-04-08T15:30:00+09:00",
+                                    }
+                                ]
+                            }
+                        ]
+                    },
                 },
             )
         )
-        mock.get("https://m.stock.naver.com/api/stock/000660/integration").mock(
+        mock.get(
+            "https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:000660|SERVICE_RECENT_ITEM:000660&_callback="
+        ).mock(
             return_value=httpx.Response(
                 200,
                 json={
-                    "stockName": "SK하이닉스",
-                    "closePrice": "150000",
-                    "compareToPreviousClosePrice": "-500",
-                    "fluctuationsRatio": "-0.33",
-                    "accumulatedTradingVolume": "1000000",
-                    "stockExchangeType": {"code": "KOSPI"},
-                    "localTradedAt": "2026-04-08T15:30:00+09:00",
+                    "result": {
+                        "areas": [
+                            {
+                                "datas": [
+                                    {
+                                        "nm": "SK하이닉스",
+                                        "nv": "150000",
+                                        "cv": "-500",
+                                        "cr": "-0.33",
+                                        "aq": "1000000",
+                                        "ms": "2026-04-08T15:30:00+09:00",
+                                    }
+                                ]
+                            }
+                        ]
+                    },
                 },
             )
         )
@@ -227,16 +420,20 @@ async def test_naver_collect_uses_ranking_when_no_symbols():
                 },
             )
         )
-        mock.get("https://m.stock.naver.com/api/stock/005930/integration").mock(
+        mock.get(
+            "https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:005930|SERVICE_RECENT_ITEM:005930&_callback="
+        ).mock(
             return_value=httpx.Response(
                 200,
-                json={"stockName": "삼성전자", "closePrice": "75000"},
+                json={"result": {"areas": [{"datas": [{"nm": "삼성전자", "nv": "75000"}]}]}},
             )
         )
-        mock.get("https://m.stock.naver.com/api/stock/000660/integration").mock(
+        mock.get(
+            "https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:000660|SERVICE_RECENT_ITEM:000660&_callback="
+        ).mock(
             return_value=httpx.Response(
                 200,
-                json={"stockName": "SK하이닉스", "closePrice": "150000"},
+                json={"result": {"areas": [{"datas": [{"nm": "SK하이닉스", "nv": "150000"}]}]}},
             )
         )
 

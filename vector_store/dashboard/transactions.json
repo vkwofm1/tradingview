@@ -1,0 +1,12 @@
+[
+  {"transaction_id": "tx-1001", "date": "2026-04-08", "category": "전문공구", "revenue": 9000000, "cogs": 5000000},
+  {"transaction_id": "tx-1002", "date": "2026-04-08", "category": "생활용품", "revenue": 5000000, "cogs": 2750000},
+  {"transaction_id": "tx-1003", "date": "2026-04-08", "category": "캠핑용품", "revenue": 4000000, "cogs": 2200000},
+  {"transaction_id": "tx-1004", "date": "2026-04-08", "category": "홈인테리어", "revenue": 4500000, "cogs": 2500000},
+  {"transaction_id": "tx-1005", "date": "2026-04-08", "category": "반려동물용품", "revenue": 4500000, "cogs": 2500000},
+  {"transaction_id": "tx-1006", "date": "2026-04-09", "category": "전문공구", "revenue": 11000000, "cogs": 6100000},
+  {"transaction_id": "tx-1007", "date": "2026-04-09", "category": "생활용품", "revenue": 5000000, "cogs": 2750000},
+  {"transaction_id": "tx-1008", "date": "2026-04-09", "category": "캠핑용품", "revenue": 4000000, "cogs": 2200000},
+  {"transaction_id": "tx-1009", "date": "2026-04-10", "category": "홈인테리어", "revenue": 4500000, "cogs": 2500000},
+  {"transaction_id": "tx-1010", "date": "2026-04-10", "category": "반려동물용품", "revenue": 3500000, "cogs": 1950000}
+]

@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from app import db
 from app.collectors import bithumb, crypto, naver_stocks, stocks, upbit
 from app.mcp_server import build_mcp
+from app.monitoring import build_operations_dashboard
 from app.runner import run_collector
 from app.scheduler import Scheduler
 
@@ -51,6 +52,23 @@ class CollectRequest(BaseModel):
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/health/apis")
+async def api_health(
+    failure_rate_threshold_pct: float = Query(10.0, ge=0.1, le=100.0),
+):
+    body = await build_operations_dashboard(
+        failure_rate_threshold_pct=failure_rate_threshold_pct,
+        job_failure_rates=db.get_job_failure_rates(
+            lookback_hours=24,
+            failure_rate_threshold_pct=failure_rate_threshold_pct,
+        ),
+    )
+    return {
+        "status": "ok" if body["summary"]["failing_apis"] == 0 else "degraded",
+        **body,
+    }
 
 
 @app.post("/collect")
@@ -109,6 +127,33 @@ def query_candles(
     limit: int = Query(60, ge=1, le=500),
 ):
     return db.query_market_candles(collector, symbol, interval, limit)
+
+
+@app.get("/dashboard/risk")
+def risk_dashboard(
+    stale_after_sec: int = Query(7200, ge=60, le=604800),
+    lookback_minutes: int = Query(60, ge=5, le=240),
+    drawdown_alert_pct: float = Query(5.0, ge=0.1, le=100.0),
+):
+    return db.get_risk_dashboard(
+        stale_after_sec=stale_after_sec,
+        lookback_minutes=lookback_minutes,
+        drawdown_alert_pct=drawdown_alert_pct,
+    )
+
+
+@app.get("/dashboard/operations")
+async def operations_dashboard(
+    failure_rate_threshold_pct: float = Query(10.0, ge=0.1, le=100.0),
+):
+    body = await build_operations_dashboard(
+        failure_rate_threshold_pct=failure_rate_threshold_pct,
+        job_failure_rates=db.get_job_failure_rates(
+            lookback_hours=24,
+            failure_rate_threshold_pct=failure_rate_threshold_pct,
+        ),
+    )
+    return body
 
 
 if __name__ == "__main__":
