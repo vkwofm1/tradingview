@@ -1,12 +1,37 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: tradingview-postgres
+    environment:
+      POSTGRES_DB: tradingview
+      POSTGRES_USER: tradingview
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tradingview_dev_password}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tradingview -d tradingview"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
   crawl:
     build: .
+    container_name: tradingview-crawl
     ports:
       - "8509:8509"
     volumes:
       - crawl-data:/app/data
     environment:
+      DB_TYPE: ${DB_TYPE:-sqlite}
       DB_PATH: /app/data/data.db
+      DATABASE_URL: ${DATABASE_URL:-postgresql://tradingview:tradingview_dev_password@postgres:5432/tradingview}
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8509/health')"]
@@ -17,3 +42,4 @@ services:
 
 volumes:
   crawl-data:
+  postgres-data:

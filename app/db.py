@@ -7,21 +7,67 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+DB_TYPE = os.environ.get("DB_TYPE", "sqlite").lower()
 DB_PATH = Path(os.environ.get("DB_PATH", "data.db"))
+POSTGRES_URL = os.environ.get("DATABASE_URL", "postgresql://user:password@localhost/tradingview")
 
 _local = threading.local()
 
 
-def _conn() -> sqlite3.Connection:
-    if not hasattr(_local, "conn"):
-        _local.conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
-        _local.conn.row_factory = sqlite3.Row
-        _local.conn.execute("PRAGMA journal_mode=WAL")
-    return _local.conn
+def _get_sqlite_conn() -> sqlite3.Connection:
+    if not hasattr(_local, "sqlite_conn"):
+        _local.sqlite_conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+        _local.sqlite_conn.row_factory = sqlite3.Row
+        _local.sqlite_conn.execute("PRAGMA journal_mode=WAL")
+    return _local.sqlite_conn
+
+
+def _get_postgres_conn():
+    if not hasattr(_local, "postgres_conn"):
+        import psycopg
+        _local.postgres_conn = psycopg.connect(POSTGRES_URL)
+    return _local.postgres_conn
+
+
+def _execute_sqlite(sql: str, params: tuple = (), fetch_one: bool = False, fetch_all: bool = False):
+    """Execute SQL on SQLite."""
+    cursor = _get_sqlite_conn().cursor()
+    cursor.execute(sql, params)
+    if fetch_one:
+        result = cursor.fetchone()
+        return result
+    elif fetch_all:
+        result = cursor.fetchall()
+        return result
+    else:
+        _get_sqlite_conn().commit()
+
+
+def _execute_postgres(sql: str, params: tuple = (), fetch_one: bool = False, fetch_all: bool = False):
+    """Execute SQL on PostgreSQL."""
+    # Convert SQLite-style ? placeholders to PostgreSQL %s
+    sql_pg = sql.replace("?", "%s")
+    cursor = _get_postgres_conn().cursor()
+    cursor.execute(sql_pg, params)
+    if fetch_one:
+        result = cursor.fetchone()
+        return result
+    elif fetch_all:
+        result = cursor.fetchall()
+        return result
+    else:
+        _get_postgres_conn().commit()
 
 
 def init_db() -> None:
-    conn = _conn()
+    if DB_TYPE == "postgres":
+        _init_postgres_db()
+    else:
+        _init_sqlite_db()
+
+
+def _init_sqlite_db() -> None:
+    conn = _get_sqlite_conn()
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS jobs (
             id          TEXT PRIMARY KEY,
@@ -61,45 +107,137 @@ def init_db() -> None:
     """)
 
 
+def _init_postgres_db() -> None:
+    conn = _get_postgres_conn()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS jobs (
+            id          VARCHAR(255) PRIMARY KEY,
+            collector   VARCHAR(255) NOT NULL,
+            status      VARCHAR(50) NOT NULL DEFAULT 'pending',
+            created_at  TIMESTAMP NOT NULL,
+            finished_at TIMESTAMP,
+            result_count INTEGER DEFAULT 0,
+            error       TEXT
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS market_data (
+            id          SERIAL PRIMARY KEY,
+            job_id      VARCHAR(255) NOT NULL REFERENCES jobs(id),
+            collector   VARCHAR(255) NOT NULL,
+            symbol      VARCHAR(255) NOT NULL,
+            payload     TEXT NOT NULL,
+            collected_at TIMESTAMP NOT NULL
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS market_candles (
+            id           SERIAL PRIMARY KEY,
+            job_id       VARCHAR(255) NOT NULL REFERENCES jobs(id),
+            collector    VARCHAR(255) NOT NULL,
+            symbol       VARCHAR(255) NOT NULL,
+            interval     VARCHAR(50) NOT NULL,
+            candle_time  TIMESTAMP NOT NULL,
+            payload      TEXT NOT NULL,
+            collected_at TIMESTAMP NOT NULL,
+            UNIQUE (collector, symbol, interval, candle_time)
+        )
+    """)
+
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_md_symbol ON market_data(symbol)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_md_collector ON market_data(collector)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_mc_symbol ON market_candles(symbol)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_mc_collector ON market_candles(collector)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_mc_time ON market_candles(candle_time)")
+
+    conn.commit()
+    cursor.close()
+
+
 def create_job(job_id: str, collector: str) -> dict:
     now = datetime.now(timezone.utc).isoformat()
-    _conn().execute(
-        "INSERT INTO jobs (id, collector, status, created_at) VALUES (?, ?, 'running', ?)",
-        (job_id, collector, now),
-    )
-    _conn().commit()
+
+    if DB_TYPE == "postgres":
+        _execute_postgres(
+            "INSERT INTO jobs (id, collector, status, created_at) VALUES (?, ?, 'running', ?)",
+            (job_id, collector, now),
+        )
+    else:
+        _execute_sqlite(
+            "INSERT INTO jobs (id, collector, status, created_at) VALUES (?, ?, 'running', ?)",
+            (job_id, collector, now),
+        )
+
     return {"id": job_id, "collector": collector, "status": "running", "created_at": now}
 
 
 def finish_job(job_id: str, count: int, error: str | None = None) -> None:
     now = datetime.now(timezone.utc).isoformat()
     status = "failed" if error else "completed"
-    _conn().execute(
-        "UPDATE jobs SET status=?, finished_at=?, result_count=?, error=? WHERE id=?",
-        (status, now, count, error, job_id),
-    )
-    _conn().commit()
+
+    if DB_TYPE == "postgres":
+        _execute_postgres(
+            "UPDATE jobs SET status=?, finished_at=?, result_count=?, error=? WHERE id=?",
+            (status, now, count, error, job_id),
+        )
+    else:
+        _execute_sqlite(
+            "UPDATE jobs SET status=?, finished_at=?, result_count=?, error=? WHERE id=?",
+            (status, now, count, error, job_id),
+        )
 
 
 def get_job(job_id: str) -> dict | None:
-    row = _conn().execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+    if DB_TYPE == "postgres":
+        row = _execute_postgres(
+            "SELECT * FROM jobs WHERE id=?",
+            (job_id,),
+            fetch_one=True,
+        )
+    else:
+        row = _execute_sqlite(
+            "SELECT * FROM jobs WHERE id=?",
+            (job_id,),
+            fetch_one=True,
+        )
+
     return dict(row) if row else None
 
 
 def list_jobs(limit: int = 20) -> list[dict]:
-    rows = _conn().execute(
-        "SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,)
-    ).fetchall()
-    return [dict(r) for r in rows]
+    if DB_TYPE == "postgres":
+        rows = _execute_postgres(
+            "SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+            fetch_all=True,
+        )
+    else:
+        rows = _execute_sqlite(
+            "SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+            fetch_all=True,
+        )
+
+    return [dict(r) for r in rows] if rows else []
 
 
 def insert_market_data(job_id: str, collector: str, symbol: str, payload: Any) -> None:
     now = datetime.now(timezone.utc).isoformat()
-    _conn().execute(
-        "INSERT INTO market_data (job_id, collector, symbol, payload, collected_at) VALUES (?,?,?,?,?)",
-        (job_id, collector, symbol, json.dumps(payload), now),
-    )
-    _conn().commit()
+
+    if DB_TYPE == "postgres":
+        _execute_postgres(
+            "INSERT INTO market_data (job_id, collector, symbol, payload, collected_at) VALUES (?,?,?,?,?)",
+            (job_id, collector, symbol, json.dumps(payload), now),
+        )
+    else:
+        _execute_sqlite(
+            "INSERT INTO market_data (job_id, collector, symbol, payload, collected_at) VALUES (?,?,?,?,?)",
+            (job_id, collector, symbol, json.dumps(payload), now),
+        )
 
 
 def insert_market_candle(
@@ -111,17 +249,27 @@ def insert_market_candle(
     payload: Any,
 ) -> None:
     now = datetime.now(timezone.utc).isoformat()
-    _conn().execute(
-        """
-        INSERT INTO market_candles (job_id, collector, symbol, interval, candle_time, payload, collected_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(collector, symbol, interval, candle_time)
-        DO UPDATE SET job_id=excluded.job_id, payload=excluded.payload, collected_at=excluded.collected_at
-        """,
-        (job_id, collector, symbol, interval, candle_time, json.dumps(payload), now),
-    )
-    _conn().commit()
 
+    if DB_TYPE == "postgres":
+        _execute_postgres(
+            """
+            INSERT INTO market_candles (job_id, collector, symbol, interval, candle_time, payload, collected_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(collector, symbol, interval, candle_time)
+            DO UPDATE SET job_id=excluded.job_id, payload=excluded.payload, collected_at=excluded.collected_at
+            """,
+            (job_id, collector, symbol, interval, candle_time, json.dumps(payload), now),
+        )
+    else:
+        _execute_sqlite(
+            """
+            INSERT INTO market_candles (job_id, collector, symbol, interval, candle_time, payload, collected_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(collector, symbol, interval, candle_time)
+            DO UPDATE SET job_id=excluded.job_id, payload=excluded.payload, collected_at=excluded.collected_at
+            """,
+            (job_id, collector, symbol, interval, candle_time, json.dumps(payload), now),
+        )
 
 
 def query_market_data(
@@ -136,9 +284,20 @@ def query_market_data(
         params.append(symbol.upper())
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     params.append(limit)
-    rows = _conn().execute(
-        f"SELECT * FROM market_data {where} ORDER BY collected_at DESC LIMIT ?", params
-    ).fetchall()
+
+    if DB_TYPE == "postgres":
+        rows = _execute_postgres(
+            f"SELECT * FROM market_data {where} ORDER BY collected_at DESC LIMIT ?",
+            tuple(params),
+            fetch_all=True,
+        )
+    else:
+        rows = _execute_sqlite(
+            f"SELECT * FROM market_data {where} ORDER BY collected_at DESC LIMIT ?",
+            tuple(params),
+            fetch_all=True,
+        )
+
     result = []
     for r in rows:
         d = dict(r)
@@ -165,9 +324,20 @@ def query_market_candles(
         params.append(interval)
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     params.append(limit)
-    rows = _conn().execute(
-        f"SELECT * FROM market_candles {where} ORDER BY candle_time DESC LIMIT ?", params
-    ).fetchall()
+
+    if DB_TYPE == "postgres":
+        rows = _execute_postgres(
+            f"SELECT * FROM market_candles {where} ORDER BY candle_time DESC LIMIT ?",
+            tuple(params),
+            fetch_all=True,
+        )
+    else:
+        rows = _execute_sqlite(
+            f"SELECT * FROM market_candles {where} ORDER BY candle_time DESC LIMIT ?",
+            tuple(params),
+            fetch_all=True,
+        )
+
     result = []
     for r in rows:
         d = dict(r)
@@ -180,6 +350,8 @@ def _parse_timestamp(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
+        if isinstance(value, datetime):
+            return value
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
@@ -238,30 +410,63 @@ def get_risk_dashboard(
     drawdown_alert_pct: float = 5.0,
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
-    conn = _conn()
 
-    job_rows = [dict(row) for row in conn.execute(
-        "SELECT * FROM jobs ORDER BY created_at DESC"
-    ).fetchall()]
-    market_rows = [dict(row) for row in conn.execute(
-        """
-        SELECT md.*
-        FROM market_data md
-        JOIN (
-            SELECT collector, symbol, MAX(collected_at) AS latest_collected_at
-            FROM market_data
-            GROUP BY collector, symbol
-        ) latest
-          ON latest.collector = md.collector
-         AND latest.symbol = md.symbol
-         AND latest.latest_collected_at = md.collected_at
-        ORDER BY md.collector, md.symbol
-        """
-    ).fetchall()]
-    candle_rows = [dict(row) for row in conn.execute(
-        "SELECT * FROM market_candles WHERE interval=? ORDER BY collector, symbol, candle_time DESC",
-        ("1m",),
-    ).fetchall()]
+    if DB_TYPE == "postgres":
+        job_rows = _execute_postgres(
+            "SELECT * FROM jobs ORDER BY created_at DESC",
+            fetch_all=True,
+        )
+        market_rows = _execute_postgres(
+            """
+            SELECT md.*
+            FROM market_data md
+            JOIN (
+                SELECT collector, symbol, MAX(collected_at) AS latest_collected_at
+                FROM market_data
+                GROUP BY collector, symbol
+            ) latest
+              ON latest.collector = md.collector
+             AND latest.symbol = md.symbol
+             AND latest.latest_collected_at = md.collected_at
+            ORDER BY md.collector, md.symbol
+            """,
+            fetch_all=True,
+        )
+        candle_rows = _execute_postgres(
+            "SELECT * FROM market_candles WHERE interval=? ORDER BY collector, symbol, candle_time DESC",
+            ("1m",),
+            fetch_all=True,
+        )
+    else:
+        job_rows = _execute_sqlite(
+            "SELECT * FROM jobs ORDER BY created_at DESC",
+            fetch_all=True,
+        )
+        market_rows = _execute_sqlite(
+            """
+            SELECT md.*
+            FROM market_data md
+            JOIN (
+                SELECT collector, symbol, MAX(collected_at) AS latest_collected_at
+                FROM market_data
+                GROUP BY collector, symbol
+            ) latest
+              ON latest.collector = md.collector
+             AND latest.symbol = md.symbol
+             AND latest.latest_collected_at = md.collected_at
+            ORDER BY md.collector, md.symbol
+            """,
+            fetch_all=True,
+        )
+        candle_rows = _execute_sqlite(
+            "SELECT * FROM market_candles WHERE interval=? ORDER BY collector, symbol, candle_time DESC",
+            ("1m",),
+            fetch_all=True,
+        )
+
+    job_rows = [dict(r) for r in job_rows] if job_rows else []
+    market_rows = [dict(r) for r in market_rows] if market_rows else []
+    candle_rows = [dict(r) for r in candle_rows] if candle_rows else []
 
     collectors: dict[str, dict[str, Any]] = {}
     jobs_24h = 0
@@ -323,7 +528,9 @@ def get_risk_dashboard(
     concentration = []
     total_market_cap = 0.0
     for row in market_rows:
-        payload = json.loads(row["payload"])
+        payload = row["payload"]
+        if isinstance(payload, str):
+            payload = json.loads(payload)
         market_cap = _to_float(payload.get("usd_market_cap") or payload.get("market_cap"))
         price = _extract_price(payload)
         if market_cap is not None and market_cap > 0:
@@ -333,7 +540,7 @@ def get_risk_dashboard(
                     "symbol": row["symbol"],
                     "market_cap": market_cap,
                     "price": price,
-                    "collected_at": row["collected_at"],
+                    "collected_at": str(row["collected_at"]),
                 }
             )
             total_market_cap += market_cap
@@ -348,7 +555,9 @@ def get_risk_dashboard(
         bucket = grouped_candles.setdefault(key, [])
         if len(bucket) >= lookback_minutes:
             continue
-        payload = json.loads(row["payload"])
+        payload = row["payload"]
+        if isinstance(payload, str):
+            payload = json.loads(payload)
         price = _extract_price(payload)
         if price is None:
             continue
@@ -356,7 +565,7 @@ def get_risk_dashboard(
             {
                 "collector": row["collector"],
                 "symbol": row["symbol"],
-                "candle_time": row["candle_time"],
+                "candle_time": str(row["candle_time"]),
                 "price": price,
             }
         )
@@ -456,9 +665,19 @@ def get_job_failure_rates(
 ) -> list[dict[str, Any]]:
     now = datetime.now(timezone.utc)
     window_start = now - timedelta(hours=lookback_hours)
-    rows = [dict(row) for row in _conn().execute(
-        "SELECT collector, status, created_at, error FROM jobs ORDER BY created_at DESC"
-    ).fetchall()]
+
+    if DB_TYPE == "postgres":
+        rows = _execute_postgres(
+            "SELECT collector, status, created_at, error FROM jobs ORDER BY created_at DESC",
+            fetch_all=True,
+        )
+    else:
+        rows = _execute_sqlite(
+            "SELECT collector, status, created_at, error FROM jobs ORDER BY created_at DESC",
+            fetch_all=True,
+        )
+
+    rows = [dict(r) for r in rows] if rows else []
 
     stats: dict[str, dict[str, Any]] = {}
     for row in rows:
