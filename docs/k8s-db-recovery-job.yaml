@@ -1,0 +1,165 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: tradingview-db-recovery
+  namespace: default
+  labels:
+    app: tradingview
+    component: database
+    job-type: recovery
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: tradingview
+        job: db-recovery
+    spec:
+      serviceAccountName: default
+      restartPolicy: Never
+
+      # This job shares the same volume as the main application
+      volumes:
+      - name: crawl-data
+        persistentVolumeClaim:
+          # Update this to match your PVC name
+          claimName: tradingview-data
+
+      containers:
+      - name: recovery
+        # Use the same image as the main application
+        image: ghcr.io/vkwofm1/tradingview:latest
+        imagePullPolicy: IfNotPresent
+
+        # Mount the shared data volume
+        volumeMounts:
+        - name: crawl-data
+          mountPath: /app/data
+
+        # Run the recovery script
+        command: ["/bin/bash"]
+        args:
+        - -c
+        - |
+          set -e
+          echo "Starting database recovery at $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          bash scripts/diagnose_and_recover.sh
+          echo "Database recovery completed at $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+
+        # Environment variables
+        env:
+        - name: DB_PATH
+          value: /app/data/data.db
+
+        # Resource limits
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+
+        # Security context
+        securityContext:
+          runAsNonRoot: false
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+
+---
+# Alternative: Create a debug pod that stays running for manual intervention
+apiVersion: v1
+kind: Pod
+metadata:
+  name: tradingview-db-debug
+  namespace: default
+  labels:
+    app: tradingview
+    component: database
+    pod-type: debug
+spec:
+  serviceAccountName: default
+  restartPolicy: Never
+
+  volumes:
+  - name: crawl-data
+    persistentVolumeClaim:
+      claimName: tradingview-data
+
+  containers:
+  - name: debug
+    image: ghcr.io/vkwofm1/tradingview:latest
+    imagePullPolicy: IfNotPresent
+
+    volumeMounts:
+    - name: crawl-data
+      mountPath: /app/data
+
+    # Keep the container running for manual intervention
+    command: ["/bin/bash"]
+    args:
+    - -c
+    - |
+      echo "Database recovery debug pod started"
+      echo "You can now run commands manually:"
+      echo "  - bash scripts/diagnose_and_recover.sh"
+      echo "  - python scripts/diagnose_db.py"
+      echo "  - sqlite3 /app/data/data.db"
+      sleep infinity
+
+    env:
+    - name: DB_PATH
+      value: /app/data/data.db
+
+    resources:
+      requests:
+        memory: "256Mi"
+        cpu: "100m"
+      limits:
+        memory: "512Mi"
+        cpu: "500m"
+
+    securityContext:
+      runAsNonRoot: false
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: false
+
+---
+# Service Account (if not already present)
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: default
+  namespace: default
+
+---
+# ClusterRole for database recovery operations
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: tradingview-db-recovery
+rules:
+- apiGroups: [""]
+  resources: ["persistentvolumeclaims"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["batch"]
+  resources: ["jobs"]
+  verbs: ["get", "list", "watch"]
+
+---
+# ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: tradingview-db-recovery
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: tradingview-db-recovery
+subjects:
+- kind: ServiceAccount
+  name: default
+  namespace: default
