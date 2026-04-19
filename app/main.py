@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from app import db
 from app.collectors import bithumb, crypto, naver_stocks, stocks, upbit
+from app.db_monitoring import get_database_health, get_database_stats, get_migration_readiness
 from app.mcp_server import build_mcp
 from app.monitoring import build_operations_dashboard
 from app.runner import run_collector
@@ -68,6 +69,33 @@ async def api_health(
     return {
         "status": "ok" if body["summary"]["failing_apis"] == 0 else "degraded",
         **body,
+    }
+
+
+@app.get("/health/db")
+def database_health():
+    health = get_database_health()
+    status = "ok" if health.get("healthy") else "unhealthy"
+    return {
+        "status": status,
+        "database": health,
+    }
+
+
+@app.get("/health/db/stats")
+def database_stats():
+    stats = get_database_stats()
+    return stats
+
+
+@app.get("/health/db/readiness")
+def database_readiness():
+    readiness = get_migration_readiness()
+    return {
+        "ready": readiness["ready"],
+        "database": readiness["database"],
+        "checks": readiness["checks"],
+        "recommendation": readiness["recommendation"],
     }
 
 
