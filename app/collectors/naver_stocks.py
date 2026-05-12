@@ -13,18 +13,24 @@ import httpx
 from app import db
 
 RANKING_URL = "https://m.stock.naver.com/api/stocks/marketValue/KOSPI"
-QUOTE_URL = "https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:{code}|SERVICE_RECENT_ITEM:{code}&_callback="
+# polling.finance.naver.com/api/realtime was returning 406; switched to the
+# mobile integration endpoint which accepts the same headers.
+QUOTE_URL = "https://m.stock.naver.com/api/stock/{code}/integration"
 
 # Fallback if the ranking endpoint is unreachable.
 FALLBACK_SYMBOLS = ["005930", "000660", "035420", "035720", "005380"]
 
 HEADERS = {
     "User-Agent": (
-        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
-        "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 Safari/604.1"
+        "Mozilla/5.0 (Linux; Android 13; Pixel 7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Mobile Safari/537.36"
     ),
     "Referer": "https://m.stock.naver.com/",
-    "Accept": "application/json",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Origin": "https://m.stock.naver.com",
 }
 
 _CONCURRENCY = 8
@@ -52,35 +58,24 @@ async def _fetch_top_kospi(client: httpx.AsyncClient, page_size: int = 100) -> l
 
 
 async def _fetch_quote(client: httpx.AsyncClient, code: str) -> dict | None:
-    """Fetch single-stock quote payload."""
+    """Fetch single-stock quote from the mobile integration endpoint."""
     resp = await client.get(QUOTE_URL.format(code=code))
     resp.raise_for_status()
     body = resp.json()
-    result = body.get("result") or {}
-    areas = result.get("areas") or []
-    item = None
-    for area in areas:
-        datas = area.get("datas") or []
-        if datas:
-            item = datas[0]
-            break
 
-    if not item:
-        return None
-
-    current_price = item.get("nv")
+    current_price = body.get("closePrice") or body.get("nv")
     if current_price is None:
         return None
 
     return {
-        "name": item.get("nm"),
+        "name": body.get("stockName") or body.get("nm"),
         "code": code,
         "current_price": current_price,
-        "change": item.get("cv"),
-        "change_rate": item.get("cr"),
-        "volume": item.get("aq"),
+        "change": body.get("compareToPreviousClosePrice") or body.get("cv"),
+        "change_rate": body.get("fluctuationsRatio") or body.get("cr"),
+        "volume": body.get("accumulatedTradingVolume") or body.get("aq"),
         "market": "KRX",
-        "trade_date": item.get("ms"),
+        "trade_date": body.get("localTradedAt") or body.get("ms"),
     }
 
 
