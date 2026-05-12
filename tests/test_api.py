@@ -66,11 +66,11 @@ def test_operations_dashboard_reports_api_checks_and_failure_alerts(client):
             )
         )
         mock.get(
-            "https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:005930|SERVICE_RECENT_ITEM:005930&_callback="
+            "https://m.stock.naver.com/api/stock/005930/basic"
         ).mock(
             return_value=httpx.Response(
                 200,
-                json={"result": {"areas": [{"datas": [{}]}]}},
+                json={"stockName": "삼성전자"},
             )
         )
         mock.get("https://api.upbit.com/v1/candles/minutes/1").mock(
@@ -95,7 +95,7 @@ def test_operations_dashboard_reports_api_checks_and_failure_alerts(client):
     assert apis["crypto"]["status"] == "healthy"
     assert apis["naver_stocks"]["status"] == "degraded"
     assert apis["naver_stocks"]["schema_status"] == "changed"
-    assert "result.areas.0.datas.0.nv" in apis["naver_stocks"]["missing_paths"]
+    assert "closePrice" in apis["naver_stocks"]["missing_paths"]
 
     rates = {item["collector"]: item for item in body["job_failure_rates"]}
     assert rates["naver_stocks"]["failure_rate_pct"] == 100.0
@@ -118,11 +118,11 @@ def test_api_health_endpoint_surfaces_upstream_failure(client):
             )
         )
         mock.get(
-            "https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:005930|SERVICE_RECENT_ITEM:005930&_callback="
+            "https://m.stock.naver.com/api/stock/005930/basic"
         ).mock(
             return_value=httpx.Response(
                 200,
-                json={"result": {"areas": [{"datas": [{"nv": "75000"}]}]}},
+                json={"stockName": "삼성전자", "closePrice": "75000"},
             )
         )
         mock.get("https://api.upbit.com/v1/candles/minutes/1").mock(
@@ -346,53 +346,29 @@ async def test_bithumb_collect_api_error_raises():
 @pytest.mark.asyncio
 async def test_naver_collect_with_explicit_symbols():
     with respx.mock(assert_all_called=True) as mock:
-        mock.get(
-            "https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:005930|SERVICE_RECENT_ITEM:005930&_callback="
-        ).mock(
+        mock.get("https://m.stock.naver.com/api/stock/005930/basic").mock(
             return_value=httpx.Response(
                 200,
                 json={
-                    "result": {
-                        "areas": [
-                            {
-                                "datas": [
-                                    {
-                                        "nm": "삼성전자",
-                                        "nv": "75000",
-                                        "cv": "1000",
-                                        "cr": "1.35",
-                                        "aq": "12345678",
-                                        "ms": "2026-04-08T15:30:00+09:00",
-                                    }
-                                ]
-                            }
-                        ]
-                    },
+                    "stockName": "삼성전자",
+                    "closePrice": "75,000",
+                    "compareToPreviousClosePrice": "1,000",
+                    "fluctuationsRatio": "1.35",
+                    "accumulatedTradingVolume": "12345678",
+                    "localTradedAt": "2026-04-08",
                 },
             )
         )
-        mock.get(
-            "https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:000660|SERVICE_RECENT_ITEM:000660&_callback="
-        ).mock(
+        mock.get("https://m.stock.naver.com/api/stock/000660/basic").mock(
             return_value=httpx.Response(
                 200,
                 json={
-                    "result": {
-                        "areas": [
-                            {
-                                "datas": [
-                                    {
-                                        "nm": "SK하이닉스",
-                                        "nv": "150000",
-                                        "cv": "-500",
-                                        "cr": "-0.33",
-                                        "aq": "1000000",
-                                        "ms": "2026-04-08T15:30:00+09:00",
-                                    }
-                                ]
-                            }
-                        ]
-                    },
+                    "stockName": "SK하이닉스",
+                    "closePrice": "150,000",
+                    "compareToPreviousClosePrice": "-500",
+                    "fluctuationsRatio": "-0.33",
+                    "accumulatedTradingVolume": "1000000",
+                    "localTradedAt": "2026-04-08",
                 },
             )
         )
@@ -403,7 +379,7 @@ async def test_naver_collect_with_explicit_symbols():
     rows = db.query_market_data("naver_stocks", "005930", 5)
     assert len(rows) == 1
     assert rows[0]["payload"]["name"] == "삼성전자"
-    assert rows[0]["payload"]["current_price"] == "75000"
+    assert rows[0]["payload"]["current_price"] == 75000.0
 
 
 @pytest.mark.asyncio
@@ -420,26 +396,41 @@ async def test_naver_collect_uses_ranking_when_no_symbols():
                 },
             )
         )
-        mock.get(
-            "https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:005930|SERVICE_RECENT_ITEM:005930&_callback="
-        ).mock(
+        mock.get("https://m.stock.naver.com/api/stock/005930/basic").mock(
             return_value=httpx.Response(
                 200,
-                json={"result": {"areas": [{"datas": [{"nm": "삼성전자", "nv": "75000"}]}]}},
+                json={"stockName": "삼성전자", "closePrice": "75000"},
             )
         )
-        mock.get(
-            "https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:000660|SERVICE_RECENT_ITEM:000660&_callback="
-        ).mock(
+        mock.get("https://m.stock.naver.com/api/stock/000660/basic").mock(
             return_value=httpx.Response(
                 200,
-                json={"result": {"areas": [{"datas": [{"nm": "SK하이닉스", "nv": "150000"}]}]}},
+                json={"stockName": "SK하이닉스", "closePrice": "150000"},
             )
         )
 
         count = await naver_stocks.collect("job-rank")
 
     assert count == 2
+
+
+@pytest.mark.asyncio
+async def test_naver_collect_skips_error_responses():
+    """HTTP errors for individual symbols are logged and skipped, not stored."""
+    with respx.mock() as mock:
+        mock.get("https://m.stock.naver.com/api/stock/005930/basic").mock(
+            return_value=httpx.Response(200, json={"stockName": "삼성전자", "closePrice": "75000"})
+        )
+        mock.get("https://m.stock.naver.com/api/stock/000660/basic").mock(
+            return_value=httpx.Response(406)
+        )
+
+        count = await naver_stocks.collect("job-skip", ["005930", "000660"])
+
+    assert count == 1
+    rows = db.query_market_data("naver_stocks", "005930", 5)
+    assert rows[0]["payload"]["name"] == "삼성전자"
+    assert db.query_market_data("naver_stocks", "000660", 5) == []
 
 
 # ---------------------------------------------------------------------------

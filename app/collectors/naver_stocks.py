@@ -1,12 +1,13 @@
 """Korean stocks collector via Naver Finance mobile JSON API.
 
 Strategy:
-- If `symbols` is provided, fetch each code's `/integration` quote.
+- If `symbols` is provided, fetch each code's basic quote.
 - Otherwise, fetch the KOSPI top-100 ranking by market cap and pull each one.
 - Concurrency is bounded by a semaphore to avoid hammering Naver.
 """
 
 import asyncio
+import logging
 
 import httpx
 
@@ -34,6 +35,7 @@ HEADERS = {
 }
 
 _CONCURRENCY = 8
+log = logging.getLogger(__name__)
 
 
 async def _fetch_top_kospi(client: httpx.AsyncClient, page_size: int = 100) -> list[str]:
@@ -57,29 +59,62 @@ async def _fetch_top_kospi(client: httpx.AsyncClient, page_size: int = 100) -> l
     return codes or list(FALLBACK_SYMBOLS)
 
 
+def _safe_float(val: str | int | float | None) -> float | None:
+    if val is None:
+        return None
+    try:
+        return float(str(val).replace(",", "").replace("%", ""))
+    except (TypeError, ValueError):
+        return None
+
+
 async def _fetch_quote(client: httpx.AsyncClient, code: str) -> dict | None:
     """Fetch single-stock quote from the mobile integration endpoint."""
     resp = await client.get(QUOTE_URL.format(code=code))
     resp.raise_for_status()
     body = resp.json()
 
-    current_price = body.get("closePrice") or body.get("nv")
+    # Unwrap common envelope structures
+    if isinstance(body, dict):
+        inner = body.get("data") or body.get("result") or body.get("stock") or body
+    else:
+        log.warning("naver_stocks: unexpected response type %s for %s", type(body).__name__, code)
+        return None
+
+    raw_price = (
+        inner.get("closePrice")
+        or inner.get("currentPrice")
+        or inner.get("nv")
+        or inner.get("stockPrice")
+        or inner.get("price")
+    )
+    if raw_price is None:
+        log.warning(
+            "naver_stocks: no price field for %s (keys=%s)",
+            code, list(body.keys())[:8],
+        )
+        return None
+
+    current_price = _safe_float(raw_price)
     if current_price is None:
         return None
 
     return {
-        "name": body.get("stockName") or body.get("nm"),
+        "name": inner.get("stockName") or inner.get("name") or inner.get("nm"),
         "code": code,
         "current_price": current_price,
-        "change": body.get("compareToPreviousClosePrice") or body.get("cv"),
-        "change_rate": body.get("fluctuationsRatio") or body.get("cr"),
-        "volume": body.get("accumulatedTradingVolume") or body.get("aq"),
+        "change": _safe_float(inner.get("compareToPreviousClosePrice") or inner.get("cv")),
+        "change_rate": _safe_float(inner.get("fluctuationsRatio") or inner.get("cr")),
+        "volume": _safe_float(inner.get("accumulatedTradingVolume") or inner.get("aq")),
         "market": "KRX",
-        "trade_date": body.get("localTradedAt") or body.get("ms"),
+        "trade_date": inner.get("localTradedAt") or inner.get("tradeDate") or inner.get("ms"),
     }
 
 
 async def collect(job_id: str, symbols: list[str] | None = None) -> int:
+    errors: list[str] = []
+    missing_price: list[str] = []
+
     async with httpx.AsyncClient(timeout=15, headers=HEADERS) as client:
         if symbols:
             codes = [str(s) for s in symbols]
@@ -87,7 +122,7 @@ async def collect(job_id: str, symbols: list[str] | None = None) -> int:
             codes = await _fetch_top_kospi(client, page_size=100)
 
         sem = asyncio.Semaphore(_CONCURRENCY)
-        results: list[tuple[str, dict | None]] = []
+        results: list[tuple[str, dict]] = []
 
         async def _one(code: str) -> None:
             async with sem:
@@ -95,15 +130,28 @@ async def collect(job_id: str, symbols: list[str] | None = None) -> int:
                     payload = await _fetch_quote(client, code)
                     if payload is not None:
                         results.append((code, payload))
+                    else:
+                        missing_price.append(code)
                 except Exception as exc:
-                    results.append((code, {"error": str(exc), "code": code}))
+                    errors.append(f"{code}: {exc}")
+                    log.warning("naver_stocks: failed to fetch %s: %s", code, exc)
 
         await asyncio.gather(*(_one(c) for c in codes))
 
+    if not results and codes:
+        if errors:
+            raise RuntimeError(
+                f"naver_stocks: 0/{len(codes)} succeeded. "
+                f"errors (first 2): {errors[:2]}"
+            )
+        raise RuntimeError(
+            f"naver_stocks: 0/{len(codes)} succeeded. "
+            f"no price field found for any symbol (first 2: {missing_price[:2]}). "
+            f"Check QUOTE_URL={QUOTE_URL!r} and response structure."
+        )
+
     count = 0
     for code, payload in results:
-        if payload is None:
-            continue
         db.insert_market_data(job_id, "naver_stocks", code, payload)
         count += 1
     return count

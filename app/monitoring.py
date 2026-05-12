@@ -8,6 +8,7 @@ from typing import Any
 
 import httpx
 
+from app import db, slack_notifier
 from app.collectors import bithumb, crypto, naver_stocks, stocks, upbit
 
 API_DEPENDENCIES = [
@@ -38,7 +39,7 @@ API_DEPENDENCIES = [
         "url": naver_stocks.QUOTE_URL.format(code="005930"),
         "params": None,
         "headers": naver_stocks.HEADERS,
-        "required_json_paths": [("result", "areas"), ("result", "areas", 0, "datas"), ("result", "areas", 0, "datas", 0, "nv")],
+        "required_json_paths": [("stockName",), ("closePrice",)],
         "schema_risk": "high",
     },
     {
@@ -156,44 +157,66 @@ async def build_operations_dashboard(
 ) -> dict[str, Any]:
     api_checks = await check_api_dependencies()
     alerts: list[dict[str, Any]] = []
+    slack_alerts_created: list[str] = []
 
     for item in api_checks:
         if item["status"] == "failing":
-            alerts.append(
-                {
-                    "severity": "high",
-                    "code": "api_unreachable",
-                    "collector": item["collector"],
-                    "message": f"{item['name']} 헬스체크가 실패했습니다.",
-                }
+            alert_data = {
+                "severity": "high",
+                "code": "api_unreachable",
+                "collector": item["collector"],
+                "message": f"{item['name']} 헬스체크가 실패했습니다.",
+            }
+            alerts.append(alert_data)
+            alert_id = slack_notifier.create_alert_from_check(
+                item,
+                alert_data["severity"],
+                alert_data["code"],
+                alert_data["message"],
             )
+            slack_alerts_created.append(alert_id)
         elif item["schema_status"] == "changed":
-            alerts.append(
-                {
-                    "severity": "high" if item["collector"] == "naver_stocks" else "medium",
-                    "code": "api_schema_changed",
-                    "collector": item["collector"],
-                    "message": f"{item['name']} 응답 스키마가 예상과 다릅니다.",
-                }
+            severity = "high" if item["collector"] == "naver_stocks" else "medium"
+            alert_data = {
+                "severity": severity,
+                "code": "api_schema_changed",
+                "collector": item["collector"],
+                "message": f"{item['name']} 응답 스키마가 예상과 다릅니다.",
+            }
+            alerts.append(alert_data)
+            alert_id = slack_notifier.create_alert_from_check(
+                item,
+                alert_data["severity"],
+                alert_data["code"],
+                alert_data["message"],
             )
+            slack_alerts_created.append(alert_id)
 
     for item in job_failure_rates:
         if item["alert"]:
-            alerts.append(
-                {
-                    "severity": "high",
-                    "code": "job_failure_rate_high",
-                    "collector": item["collector"],
-                    "message": (
-                        f"{item['collector']} 최근 24시간 실패율이 "
-                        f"{failure_rate_threshold_pct}% 임계치를 초과했습니다."
-                    ),
-                }
+            alert_data = {
+                "severity": "high",
+                "code": "job_failure_rate_high",
+                "collector": item["collector"],
+                "message": (
+                    f"{item['collector']} 최근 24시간 실패율이 "
+                    f"{failure_rate_threshold_pct}% 임계치를 초과했습니다."
+                ),
+            }
+            alerts.append(alert_data)
+            alert_id = slack_notifier.create_alert_from_check(
+                item,
+                alert_data["severity"],
+                alert_data["code"],
+                alert_data["message"],
             )
+            slack_alerts_created.append(alert_id)
 
     healthy_apis = sum(1 for item in api_checks if item["status"] == "healthy")
     degraded_apis = sum(1 for item in api_checks if item["status"] == "degraded")
     failing_apis = sum(1 for item in api_checks if item["status"] == "failing")
+
+    slack_stats = db.get_slack_delivery_stats()
 
     return {
         "summary": {
@@ -203,9 +226,12 @@ async def build_operations_dashboard(
             "failing_apis": failing_apis,
             "collectors_over_failure_threshold": sum(1 for item in job_failure_rates if item["alert"]),
             "alert_count": len(alerts),
+            "new_slack_alerts": len(slack_alerts_created),
         },
         "apis": api_checks,
         "job_failure_rates": job_failure_rates,
         "alert_channels": _alert_channels(),
         "alerts": alerts,
+        "slack_alerts_created": slack_alerts_created,
+        "slack_delivery": slack_stats,
     }
