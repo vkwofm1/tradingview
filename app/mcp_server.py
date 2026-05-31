@@ -144,6 +144,36 @@ def build_mcp() -> FastMCP:
         return await market_archive.fetch_stats()
 
     @mcp.tool()
+    async def market_archive_collect_stock(
+        market: str,
+        symbol: str,
+        lookback_days_if_empty: int = 1,
+    ) -> Any:
+        """주식(국장 KIS / 미장 yfinance) 단일 종목 1분봉 즉시 수집.
+
+        Args:
+            market: "kr" (국장) | "us" (미장)
+            symbol: "005930" (kr) | "AAPL" (us)
+            lookback_days_if_empty: us 전용. yfinance 1m 7일 한도.
+
+        포트폴리오 선정 시 LLM이 본 tool로 분단위 데이터를 inspect.
+        """
+        import httpx
+        async with httpx.AsyncClient(
+            timeout=market_archive.DEFAULT_TIMEOUT,
+            headers=market_archive._headers(),
+        ) as client:
+            r = await client.post(
+                f"{market_archive.DEFAULT_BASE_URL.rstrip('/')}/api/collect_stock_until_now",
+                params={
+                    "market": market, "symbol": symbol,
+                    "lookback_days_if_empty": str(lookback_days_if_empty),
+                },
+            )
+            r.raise_for_status()
+            return r.json()
+
+    @mcp.tool()
     def list_jobs(limit: int = 20) -> ListResponse:
         """Return the most recent collection jobs."""
         return ListResponse(result=db.list_jobs(limit))
