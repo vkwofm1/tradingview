@@ -10,6 +10,11 @@ dependencies = [
     "pydantic>=2.0",
     "mcp>=1.2,<2.0",
     "psycopg[binary]>=3.1",
+    # 2026-05-31: 거래소 1m 통합 collector
+    "ccxt>=4.5.54,<5.0",
+    "yfinance>=1.2.0,<2.0",
+    "lxml>=4.9.0",
+    "pandas>=2.1.0,<3.0",
 ]
 
 [project.optional-dependencies]

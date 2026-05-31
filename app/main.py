@@ -8,7 +8,7 @@ from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 
 from app import db, adoption_metrics
-from app.collectors import bithumb, crypto, naver_stocks, stocks, upbit
+from app.collectors import bithumb, crypto, exchange_1m, naver_stocks, stocks, upbit
 from app.db_monitoring import get_database_health, get_database_stats, get_migration_readiness
 from app.mcp_server import build_mcp
 from app.monitoring import build_operations_dashboard
@@ -22,6 +22,10 @@ COLLECTORS = {
     "naver_stocks": naver_stocks.collect,
     "upbit": upbit.collect,
     "bithumb": bithumb.collect,
+    # 1분봉 통합 collector (2026-05-31)
+    "krw_1m": exchange_1m.collect_krw_1m,
+    "us_stocks_1m": exchange_1m.collect_us_stocks_1m,
+    "kr_stocks_1m": exchange_1m.collect_kr_stocks_1m,
 }
 
 mcp = build_mcp()
@@ -142,6 +146,43 @@ async def start_collection_sync(req: CollectRequest):
     if req.collector not in COLLECTORS:
         raise HTTPException(400, f"Unknown collector: {req.collector}. Available: {list(COLLECTORS)}")
     return await run_collector(req.collector, COLLECTORS[req.collector], req.symbols)
+
+
+# ── 거래소+티커 즉시 수집 — 사용자 요청 핵심 API (2026-05-31) ───────────────
+# 마지막 수집부터 현재까지 1분봉을 중복 없이 즉시 채움. 회의 시점에 LLM 사용.
+
+class StockUntilNowRequest(BaseModel):
+    market: str  # "kr" | "us"
+    symbols: list[str]
+
+
+@app.post("/collect/until_now/krw")
+async def collect_until_now_krw(targets: list[str]):
+    """빗썸/업비트 KRW 즉시 수집. targets=["bithumb:BTC/KRW", "upbit:ETH/KRW"]."""
+    if not targets:
+        raise HTTPException(400, "targets required (format: 'exchange:symbol')")
+
+    async def _fn(jid, _s):
+        return await exchange_1m.collect_krw_1m_until_now(jid, targets)
+
+    return await run_collector("krw_1m_until_now", _fn, None)
+
+
+@app.post("/collect/until_now/stocks")
+async def collect_until_now_stocks(req: StockUntilNowRequest):
+    """국장/미장 즉시 수집. market='kr'은 KIS API, 'us'는 yfinance."""
+    market = req.market.lower()
+    if market not in ("kr", "us") or not req.symbols:
+        raise HTTPException(400, "market (kr|us) and symbols required")
+
+    if market == "us":
+        async def _fn(jid, _s):
+            return await exchange_1m.collect_us_stocks_1m_until_now(jid, req.symbols)
+        return await run_collector("us_stocks_1m_until_now", _fn, None)
+    else:
+        async def _fn(jid, _s):
+            return await exchange_1m.collect_kr_stocks_1m_until_now(jid, req.symbols)
+        return await run_collector("kr_stocks_1m_until_now", _fn, None)
 
 
 @app.get("/jobs")
