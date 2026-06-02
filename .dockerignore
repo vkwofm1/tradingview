@@ -1,0 +1,7 @@
+.git
+gitdir-copy
+__pycache__
+.pytest_cache
+*.pyc
+data.db
+*.db

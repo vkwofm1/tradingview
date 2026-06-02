@@ -189,6 +189,48 @@ def test_get_job_not_found(client):
     assert resp.status_code == 404
 
 
+def test_collection_policy_crud_and_symbol_resolution(client):
+    resp = client.post(
+        "/collection-policies",
+        json={
+            "collector": "stocks",
+            "include_symbols": ["aapl", "msft", "aapl"],
+            "exclude_symbols": ["msft"],
+            "include_fields": ["regularMarketPrice"],
+            "exclude_fields": ["previousClose"],
+            "notes": "foreign meeting: focus on AAPL",
+            "source": "invest-lead-meeting-foreign",
+            "requested_by": "invest-lead",
+        },
+    )
+    assert resp.status_code == 200
+    policy = resp.json()
+    assert policy["include_symbols"] == ["AAPL", "MSFT"]
+    assert policy["exclude_symbols"] == ["MSFT"]
+
+    assert db.resolve_collection_symbols("stocks") == ["AAPL"]
+    filtered = db.apply_collection_policy(
+        "stocks",
+        "AAPL",
+        {
+            "symbol": "AAPL",
+            "regularMarketPrice": 100,
+            "previousClose": 90,
+            "exchangeName": "NMS",
+        },
+    )
+    assert filtered == {"symbol": "AAPL", "regularMarketPrice": 100}
+
+    resp = client.get("/collection-policies/stocks")
+    assert resp.status_code == 200
+    assert resp.json()["requested_by"] == "invest-lead"
+
+
+def test_collection_policy_rejects_unknown_collector(client):
+    resp = client.post("/collection-policies", json={"collector": "unknown"})
+    assert resp.status_code == 400
+
+
 def test_risk_dashboard_summarizes_collector_health_and_alerts(client):
     now = datetime.now(timezone.utc)
 
@@ -543,6 +585,8 @@ async def test_mcp_tools_listed_and_query():
             "collect_us_stocks",
             "collect_global_crypto",
             "query_market_data",
+            "upsert_collection_policy",
+            "list_collection_policies",
             "list_jobs",
             "get_job",
         }:

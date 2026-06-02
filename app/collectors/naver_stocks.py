@@ -14,9 +14,10 @@ import httpx
 from app import db
 
 RANKING_URL = "https://m.stock.naver.com/api/stocks/marketValue/KOSPI"
-# polling.finance.naver.com/api/realtime was returning 406; switched to the
-# mobile integration endpoint which accepts the same headers.
-QUOTE_URL = "https://m.stock.naver.com/api/stock/{code}/integration"
+# The integration endpoint keeps fundamentals in nested sections and no longer
+# exposes the quote fields consistently. The basic endpoint has stable quote
+# keys used by the collector.
+QUOTE_URL = "https://m.stock.naver.com/api/stock/{code}/basic"
 
 # Fallback if the ranking endpoint is unreachable.
 FALLBACK_SYMBOLS = ["005930", "000660", "035420", "035720", "005380"]
@@ -81,12 +82,19 @@ async def _fetch_quote(client: httpx.AsyncClient, code: str) -> dict | None:
         log.warning("naver_stocks: unexpected response type %s for %s", type(body).__name__, code)
         return None
 
+    total_infos = {}
+    for item in inner.get("totalInfos") or []:
+        if isinstance(item, dict) and item.get("code"):
+            total_infos[item["code"]] = item.get("value")
+
     raw_price = (
         inner.get("closePrice")
         or inner.get("currentPrice")
         or inner.get("nv")
         or inner.get("stockPrice")
         or inner.get("price")
+        or total_infos.get("closePrice")
+        or total_infos.get("nowPrice")
     )
     if raw_price is None:
         log.warning(
@@ -105,7 +113,7 @@ async def _fetch_quote(client: httpx.AsyncClient, code: str) -> dict | None:
         "current_price": current_price,
         "change": _safe_float(inner.get("compareToPreviousClosePrice") or inner.get("cv")),
         "change_rate": _safe_float(inner.get("fluctuationsRatio") or inner.get("cr")),
-        "volume": _safe_float(inner.get("accumulatedTradingVolume") or inner.get("aq")),
+        "volume": _safe_float(inner.get("accumulatedTradingVolume") or inner.get("aq") or total_infos.get("accumulatedTradingVolume")),
         "market": "KRX",
         "trade_date": inner.get("localTradedAt") or inner.get("tradeDate") or inner.get("ms"),
     }
@@ -152,6 +160,9 @@ async def collect(job_id: str, symbols: list[str] | None = None) -> int:
 
     count = 0
     for code, payload in results:
-        db.insert_market_data(job_id, "naver_stocks", code, payload)
+        filtered = db.apply_collection_policy("naver_stocks", code, payload)
+        if filtered is None:
+            continue
+        db.insert_market_data(job_id, "naver_stocks", code, filtered)
         count += 1
     return count

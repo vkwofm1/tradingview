@@ -8,7 +8,7 @@ from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 
 from app import db, adoption_metrics
-from app.collectors import bithumb, crypto, exchange_1m, naver_stocks, stocks, upbit
+from app.collectors import bithumb, crypto, naver_stocks, stocks, upbit
 from app.db_monitoring import get_database_health, get_database_stats, get_migration_readiness
 from app.mcp_server import build_mcp
 from app.monitoring import build_operations_dashboard
@@ -22,10 +22,6 @@ COLLECTORS = {
     "naver_stocks": naver_stocks.collect,
     "upbit": upbit.collect,
     "bithumb": bithumb.collect,
-    # 1분봉 통합 collector (2026-05-31)
-    "krw_1m": exchange_1m.collect_krw_1m,
-    "us_stocks_1m": exchange_1m.collect_us_stocks_1m,
-    "kr_stocks_1m": exchange_1m.collect_kr_stocks_1m,
 }
 
 mcp = build_mcp()
@@ -56,6 +52,18 @@ app.mount("/mcp", mcp_app)
 class CollectRequest(BaseModel):
     collector: str
     symbols: list[str] | None = None
+
+
+class CollectionPolicyRequest(BaseModel):
+    collector: str
+    include_symbols: list[str] | None = None
+    exclude_symbols: list[str] | None = None
+    include_fields: list[str] | None = None
+    exclude_fields: list[str] | None = None
+    notes: str = ""
+    source: str = "manual"
+    requested_by: str = ""
+    active: bool = True
 
 
 class SurveyResponse(BaseModel):
@@ -128,10 +136,11 @@ async def start_collection(req: CollectRequest):
         raise HTTPException(400, f"Unknown collector: {req.collector}. Available: {list(COLLECTORS)}")
     job_id = uuid.uuid4().hex[:12]
     job = db.create_job(job_id, req.collector)
+    resolved_symbols = db.resolve_collection_symbols(req.collector, req.symbols)
 
     async def _run():
         try:
-            count = await COLLECTORS[req.collector](job_id, req.symbols)
+            count = await COLLECTORS[req.collector](job_id, resolved_symbols)
             db.finish_job(job_id, count)
         except Exception as exc:
             db.finish_job(job_id, 0, str(exc))
@@ -148,46 +157,39 @@ async def start_collection_sync(req: CollectRequest):
     return await run_collector(req.collector, COLLECTORS[req.collector], req.symbols)
 
 
-# ── 거래소+티커 즉시 수집 — 사용자 요청 핵심 API (2026-05-31) ───────────────
-# 마지막 수집부터 현재까지 1분봉을 중복 없이 즉시 채움. 회의 시점에 LLM 사용.
-
-class StockUntilNowRequest(BaseModel):
-    market: str  # "kr" | "us"
-    symbols: list[str]
-
-
-@app.post("/collect/until_now/krw")
-async def collect_until_now_krw(targets: list[str]):
-    """빗썸/업비트 KRW 즉시 수집. targets=["bithumb:BTC/KRW", "upbit:ETH/KRW"]."""
-    if not targets:
-        raise HTTPException(400, "targets required (format: 'exchange:symbol')")
-
-    async def _fn(jid, _s):
-        return await exchange_1m.collect_krw_1m_until_now(jid, targets)
-
-    return await run_collector("krw_1m_until_now", _fn, None)
-
-
-@app.post("/collect/until_now/stocks")
-async def collect_until_now_stocks(req: StockUntilNowRequest):
-    """국장/미장 즉시 수집. market='kr'은 KIS API, 'us'는 yfinance."""
-    market = req.market.lower()
-    if market not in ("kr", "us") or not req.symbols:
-        raise HTTPException(400, "market (kr|us) and symbols required")
-
-    if market == "us":
-        async def _fn(jid, _s):
-            return await exchange_1m.collect_us_stocks_1m_until_now(jid, req.symbols)
-        return await run_collector("us_stocks_1m_until_now", _fn, None)
-    else:
-        async def _fn(jid, _s):
-            return await exchange_1m.collect_kr_stocks_1m_until_now(jid, req.symbols)
-        return await run_collector("kr_stocks_1m_until_now", _fn, None)
-
-
 @app.get("/jobs")
 def list_jobs(limit: int = Query(20, ge=1, le=100)):
     return db.list_jobs(limit)
+
+
+@app.get("/collection-policies")
+def list_collection_policies():
+    return db.list_collection_policies()
+
+
+@app.get("/collection-policies/{collector}")
+def get_collection_policy(collector: str):
+    policy = db.get_collection_policy(collector)
+    if not policy:
+        raise HTTPException(404, "Collection policy not found")
+    return policy
+
+
+@app.post("/collection-policies")
+def upsert_collection_policy(req: CollectionPolicyRequest):
+    if req.collector not in COLLECTORS:
+        raise HTTPException(400, f"Unknown collector: {req.collector}. Available: {list(COLLECTORS)}")
+    return db.upsert_collection_policy(
+        collector=req.collector,
+        include_symbols=req.include_symbols,
+        exclude_symbols=req.exclude_symbols,
+        include_fields=req.include_fields,
+        exclude_fields=req.exclude_fields,
+        notes=req.notes,
+        source=req.source,
+        requested_by=req.requested_by,
+        active=req.active,
+    )
 
 
 @app.get("/jobs/{job_id}")

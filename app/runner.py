@@ -21,7 +21,8 @@ async def run_collector(
     job_id = uuid.uuid4().hex[:12]
     db.create_job(job_id, name)
     try:
-        count = await fn(job_id, symbols)
+        resolved_symbols = db.resolve_collection_symbols(name, symbols)
+        count = await fn(job_id, resolved_symbols)
         db.finish_job(job_id, count)
     except Exception as exc:  # noqa: BLE001 — we want to record any failure
         db.finish_job(job_id, 0, str(exc))

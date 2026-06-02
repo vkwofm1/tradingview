@@ -15,18 +15,29 @@ _local = threading.local()
 
 
 def _get_sqlite_conn() -> sqlite3.Connection:
+    db_path = str(DB_PATH)
+    if getattr(_local, "sqlite_path", None) != db_path and hasattr(_local, "sqlite_conn"):
+        _local.sqlite_conn.close()
+        del _local.sqlite_conn
     if not hasattr(_local, "sqlite_conn"):
         _local.sqlite_conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
         _local.sqlite_conn.row_factory = sqlite3.Row
         _local.sqlite_conn.execute("PRAGMA journal_mode=WAL")
+        _local.sqlite_path = db_path
     return _local.sqlite_conn
 
 
 def _get_postgres_conn():
     if not hasattr(_local, "postgres_conn"):
         import psycopg
-        _local.postgres_conn = psycopg.connect(POSTGRES_URL)
+        from psycopg.rows import dict_row
+
+        _local.postgres_conn = psycopg.connect(POSTGRES_URL, row_factory=dict_row)
     return _local.postgres_conn
+
+
+def _conn() -> sqlite3.Connection:
+    return _get_sqlite_conn()
 
 
 def _execute_sqlite(sql: str, params: tuple = (), fetch_one: bool = False, fetch_all: bool = False):
@@ -104,6 +115,18 @@ def _init_sqlite_db() -> None:
         CREATE INDEX IF NOT EXISTS idx_mc_symbol ON market_candles(symbol);
         CREATE INDEX IF NOT EXISTS idx_mc_collector ON market_candles(collector);
         CREATE INDEX IF NOT EXISTS idx_mc_time ON market_candles(candle_time);
+        CREATE TABLE IF NOT EXISTS collection_policies (
+            collector       TEXT PRIMARY KEY,
+            include_symbols TEXT NOT NULL DEFAULT '[]',
+            exclude_symbols TEXT NOT NULL DEFAULT '[]',
+            include_fields  TEXT NOT NULL DEFAULT '[]',
+            exclude_fields  TEXT NOT NULL DEFAULT '[]',
+            notes           TEXT NOT NULL DEFAULT '',
+            source          TEXT NOT NULL DEFAULT '',
+            requested_by    TEXT NOT NULL DEFAULT '',
+            active          INTEGER NOT NULL DEFAULT 1,
+            updated_at      TEXT NOT NULL
+        );
     """)
 
 
@@ -153,6 +176,21 @@ def _init_postgres_db() -> None:
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mc_symbol ON market_candles(symbol)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mc_collector ON market_candles(collector)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mc_time ON market_candles(candle_time)")
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS collection_policies (
+            collector       VARCHAR(255) PRIMARY KEY,
+            include_symbols TEXT NOT NULL DEFAULT '[]',
+            exclude_symbols TEXT NOT NULL DEFAULT '[]',
+            include_fields  TEXT NOT NULL DEFAULT '[]',
+            exclude_fields  TEXT NOT NULL DEFAULT '[]',
+            notes           TEXT NOT NULL DEFAULT '',
+            source          TEXT NOT NULL DEFAULT '',
+            requested_by    TEXT NOT NULL DEFAULT '',
+            active          INTEGER NOT NULL DEFAULT 1,
+            updated_at      TIMESTAMP NOT NULL
+        )
+    """)
 
     conn.commit()
     cursor.close()
@@ -270,6 +308,179 @@ def insert_market_candle(
             """,
             (job_id, collector, symbol, interval, candle_time, json.dumps(payload), now),
         )
+
+
+def _loads_list(value: str | None) -> list[str]:
+    if not value:
+        return []
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(decoded, list):
+        return []
+    return [str(item).strip() for item in decoded if str(item).strip()]
+
+
+def _normalize_symbols(symbols: list[str] | None) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for symbol in symbols or []:
+        value = str(symbol).strip().upper()
+        if value and value not in seen:
+            result.append(value)
+            seen.add(value)
+    return result
+
+
+def upsert_collection_policy(
+    collector: str,
+    include_symbols: list[str] | None = None,
+    exclude_symbols: list[str] | None = None,
+    include_fields: list[str] | None = None,
+    exclude_fields: list[str] | None = None,
+    notes: str = "",
+    source: str = "",
+    requested_by: str = "",
+    active: bool = True,
+) -> dict:
+    now = datetime.now(timezone.utc).isoformat()
+    policy = {
+        "collector": collector.strip(),
+        "include_symbols": _normalize_symbols(include_symbols),
+        "exclude_symbols": _normalize_symbols(exclude_symbols),
+        "include_fields": [str(f).strip() for f in include_fields or [] if str(f).strip()],
+        "exclude_fields": [str(f).strip() for f in exclude_fields or [] if str(f).strip()],
+        "notes": notes or "",
+        "source": source or "",
+        "requested_by": requested_by or "",
+        "active": bool(active),
+        "updated_at": now,
+    }
+    sql = """
+        INSERT INTO collection_policies
+            (collector, include_symbols, exclude_symbols, include_fields, exclude_fields,
+             notes, source, requested_by, active, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(collector) DO UPDATE SET
+            include_symbols=excluded.include_symbols,
+            exclude_symbols=excluded.exclude_symbols,
+            include_fields=excluded.include_fields,
+            exclude_fields=excluded.exclude_fields,
+            notes=excluded.notes,
+            source=excluded.source,
+            requested_by=excluded.requested_by,
+            active=excluded.active,
+            updated_at=excluded.updated_at
+    """
+    params = (
+        policy["collector"],
+        json.dumps(policy["include_symbols"]),
+        json.dumps(policy["exclude_symbols"]),
+        json.dumps(policy["include_fields"]),
+        json.dumps(policy["exclude_fields"]),
+        policy["notes"],
+        policy["source"],
+        policy["requested_by"],
+        1 if policy["active"] else 0,
+        policy["updated_at"],
+    )
+    if DB_TYPE == "postgres":
+        _execute_postgres(sql, params)
+    else:
+        _execute_sqlite(sql, params)
+    return policy
+
+
+def get_collection_policy(collector: str) -> dict | None:
+    if DB_TYPE == "postgres":
+        row = _execute_postgres(
+            "SELECT * FROM collection_policies WHERE collector=?",
+            (collector,),
+            fetch_one=True,
+        )
+    else:
+        row = _execute_sqlite(
+            "SELECT * FROM collection_policies WHERE collector=?",
+            (collector,),
+            fetch_one=True,
+        )
+    if not row:
+        return None
+    data = dict(row)
+    return {
+        "collector": data["collector"],
+        "include_symbols": _loads_list(data["include_symbols"]),
+        "exclude_symbols": _loads_list(data["exclude_symbols"]),
+        "include_fields": _loads_list(data["include_fields"]),
+        "exclude_fields": _loads_list(data["exclude_fields"]),
+        "notes": data["notes"],
+        "source": data["source"],
+        "requested_by": data["requested_by"],
+        "active": bool(data["active"]),
+        "updated_at": str(data["updated_at"]),
+    }
+
+
+def list_collection_policies() -> list[dict]:
+    if DB_TYPE == "postgres":
+        rows = _execute_postgres(
+            "SELECT collector FROM collection_policies ORDER BY collector",
+            fetch_all=True,
+        )
+    else:
+        rows = _execute_sqlite(
+            "SELECT collector FROM collection_policies ORDER BY collector",
+            fetch_all=True,
+        )
+    return [
+        policy
+        for row in rows or []
+        if (policy := get_collection_policy(dict(row)["collector"])) is not None
+    ]
+
+
+def resolve_collection_symbols(
+    collector: str,
+    requested_symbols: list[str] | None = None,
+) -> list[str] | None:
+    policy = get_collection_policy(collector)
+    if not policy or not policy["active"]:
+        return _normalize_symbols(requested_symbols) if requested_symbols else None
+
+    base = _normalize_symbols(requested_symbols)
+    if not base and policy["include_symbols"]:
+        base = policy["include_symbols"]
+    if not base:
+        return None
+
+    excluded = set(policy["exclude_symbols"])
+    return [symbol for symbol in base if symbol not in excluded]
+
+
+def apply_collection_policy(
+    collector: str,
+    symbol: str,
+    payload: dict,
+) -> dict | None:
+    policy = get_collection_policy(collector)
+    normalized_symbol = str(symbol).strip().upper()
+    if not policy or not policy["active"]:
+        return payload
+    if normalized_symbol in set(policy["exclude_symbols"]):
+        return None
+
+    result = dict(payload)
+    include_fields = policy["include_fields"]
+    if include_fields:
+        keep = set(include_fields) | {"symbol", "code", "name", "market"}
+        result = {key: value for key, value in result.items() if key in keep}
+
+    exclude_fields = set(policy["exclude_fields"])
+    if exclude_fields:
+        result = {key: value for key, value in result.items() if key not in exclude_fields}
+
+    return result
 
 
 def query_market_data(
@@ -713,3 +924,13 @@ def get_job_failure_rates(
             }
         )
     return sorted(result, key=lambda item: (-item["failure_rate_pct"], item["collector"]))
+
+
+def get_slack_delivery_stats() -> dict[str, Any]:
+    """Return Slack delivery counters for the operations dashboard."""
+    return {
+        "configured": bool(os.environ.get("ALERT_SLACK_WEBHOOK_URL", "").strip()),
+        "delivered_24h": 0,
+        "failed_24h": 0,
+        "last_error": None,
+    }

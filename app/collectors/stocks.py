@@ -31,6 +31,9 @@ async def collect(job_id: str, symbols: list[str] | None = None) -> int:
                 "previousClose": meta.get("previousClose"),
                 "exchangeName": meta.get("exchangeName"),
             }
-            db.insert_market_data(job_id, "stocks", sym.upper(), payload)
+            filtered = db.apply_collection_policy("stocks", sym, payload)
+            if filtered is None:
+                continue
+            db.insert_market_data(job_id, "stocks", sym.upper(), filtered)
             count += 1
     return count
