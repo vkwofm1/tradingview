@@ -8,6 +8,8 @@ Strategy:
 
 import asyncio
 import logging
+import os
+import random
 
 import httpx
 
@@ -35,8 +37,30 @@ HEADERS = {
     "Origin": "https://m.stock.naver.com",
 }
 
-_CONCURRENCY = 8
+_DEFAULT_CONCURRENCY = 1
+_DEFAULT_REQUEST_DELAY_SEC = 1.25
+_DEFAULT_REQUEST_JITTER_SEC = 0.75
 log = logging.getLogger(__name__)
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return max(0.0, float(os.environ.get(name, default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.environ.get(name, default)))
+    except (TypeError, ValueError):
+        return default
+
+
+async def _request_spacing(delay_sec: float, jitter_sec: float) -> None:
+    wait = delay_sec + (random.uniform(0, jitter_sec) if jitter_sec else 0.0)
+    if wait > 0:
+        await asyncio.sleep(wait)
 
 
 async def _fetch_top_kospi(client: httpx.AsyncClient, page_size: int = 100) -> list[str]:
@@ -129,11 +153,18 @@ async def collect(job_id: str, symbols: list[str] | None = None) -> int:
         else:
             codes = await _fetch_top_kospi(client, page_size=100)
 
-        sem = asyncio.Semaphore(_CONCURRENCY)
+        concurrency = _env_int("NAVER_STOCKS_CONCURRENCY", _DEFAULT_CONCURRENCY)
+        delay_sec = _env_float("STOCK_REQUEST_DELAY_SEC", _DEFAULT_REQUEST_DELAY_SEC)
+        jitter_sec = _env_float("STOCK_REQUEST_JITTER_SEC", _DEFAULT_REQUEST_JITTER_SEC)
+        sem = asyncio.Semaphore(concurrency)
+        spacing_lock = asyncio.Lock()
         results: list[tuple[str, dict]] = []
 
-        async def _one(code: str) -> None:
+        async def _one(index: int, code: str) -> None:
             async with sem:
+                async with spacing_lock:
+                    if index > 0:
+                        await _request_spacing(delay_sec, jitter_sec)
                 try:
                     payload = await _fetch_quote(client, code)
                     if payload is not None:
@@ -144,7 +175,7 @@ async def collect(job_id: str, symbols: list[str] | None = None) -> int:
                     errors.append(f"{code}: {exc}")
                     log.warning("naver_stocks: failed to fetch %s: %s", code, exc)
 
-        await asyncio.gather(*(_one(c) for c in codes))
+        await asyncio.gather(*(_one(index, code) for index, code in enumerate(codes)))
 
     if not results and codes:
         if errors:
