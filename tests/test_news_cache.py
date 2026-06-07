@@ -1,3 +1,5 @@
+import httpx
+
 from app import news_cache
 
 
@@ -15,7 +17,7 @@ class FakeResponse:
 def test_search_news_uses_ttl_cache_and_rotates_keys(monkeypatch):
     news_cache._cache.clear()
     news_cache._state["next_index"] = 0
-    news_cache._state["last_request_at"] = 0.0
+    news_cache._state["last_request_at_by_key"] = {}
     monkeypatch.setenv("SERPAPI_API_KEYS", "key-one,key-two")
     monkeypatch.setattr(news_cache, "MIN_INTERVAL_SEC", 0)
 
@@ -46,3 +48,55 @@ def test_search_news_clamps_ttl():
     assert news_cache._clamp_ttl(10) == 3600
     assert news_cache._clamp_ttl(20000) == 10800
     assert news_cache._clamp_ttl(7200) == 7200
+
+
+def test_search_news_does_not_wait_between_different_keys(monkeypatch):
+    news_cache._cache.clear()
+    news_cache._state["next_index"] = 0
+    news_cache._state["last_request_at_by_key"] = {}
+    monkeypatch.setenv("SERPAPI_API_KEYS", "rate-limited-key,working-key")
+    monkeypatch.setattr(news_cache, "MIN_INTERVAL_SEC", 30)
+
+    calls = []
+    sleeps = []
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    def fake_get(url, params, timeout):
+        calls.append(params["api_key"])
+        if params["api_key"] == "rate-limited-key":
+            request = httpx.Request("GET", "https://serpapi.com/search.json?api_key=rate-limited-key")
+            response = httpx.Response(429, request=request)
+            raise httpx.HTTPStatusError("rate limited api_key=rate-limited-key", request=request, response=response)
+        return FakeResponse({"news_results": [{"title": "ok", "source": "source", "link": "https://example.com"}]})
+
+    monkeypatch.setattr(news_cache.time, "sleep", fake_sleep)
+    monkeypatch.setattr(news_cache.httpx, "get", fake_get)
+
+    result = news_cache.search_news("btc", ttl_sec=3600)
+
+    assert result["status"] == "ok"
+    assert calls == ["rate-limited-key", "working-key"]
+    assert sleeps == []
+
+
+def test_search_news_error_summary_does_not_leak_api_key(monkeypatch):
+    news_cache._cache.clear()
+    news_cache._state["next_index"] = 0
+    news_cache._state["last_request_at_by_key"] = {}
+    monkeypatch.setenv("SERPAPI_API_KEYS", "secret-key")
+    monkeypatch.setattr(news_cache, "MIN_INTERVAL_SEC", 0)
+
+    def fake_get(url, params, timeout):
+        request = httpx.Request("GET", "https://serpapi.com/search.json?api_key=secret-key")
+        response = httpx.Response(429, request=request)
+        raise httpx.HTTPStatusError("rate limited api_key=secret-key", request=request, response=response)
+
+    monkeypatch.setattr(news_cache.httpx, "get", fake_get)
+
+    result = news_cache.search_news("btc", ttl_sec=3600)
+
+    assert result["status"] == "error"
+    assert result["errors"] == [{"key_index": 0, "error": "HTTP 429"}]
+    assert "secret-key" not in str(result)

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import time
+import logging
 from threading import Lock
 from typing import Any
 
@@ -21,8 +22,11 @@ MIN_INTERVAL_SEC = float(os.getenv("SERPAPI_MIN_INTERVAL_SEC", "30"))
 SERPAPI_URL = "https://serpapi.com/search.json"
 
 _cache: dict[tuple[str, str], dict[str, Any]] = {}
-_state = {"next_index": 0, "last_request_at": 0.0}
+_state = {"next_index": 0, "last_request_at_by_key": {}}
 _lock = Lock()
+
+# httpx INFO logs include the full request URL, which would expose api_key.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 def _split_keys(value: str) -> list[str]:
@@ -89,12 +93,35 @@ def _cache_set(engine: str, query: str, payload: dict[str, Any], items: list[dic
     }
 
 
-def _wait_for_rate_limit_locked() -> None:
+def _last_request_at_by_key() -> dict[int, float]:
+    value = _state.setdefault("last_request_at_by_key", {})
+    if not isinstance(value, dict):
+        value = {}
+        _state["last_request_at_by_key"] = value
+    return value
+
+
+def _wait_for_rate_limit_locked(key_index: int) -> None:
     if MIN_INTERVAL_SEC <= 0:
         return
-    wait = MIN_INTERVAL_SEC - (time.time() - float(_state.get("last_request_at", 0)))
+    last_request_at = float(_last_request_at_by_key().get(key_index, 0))
+    wait = MIN_INTERVAL_SEC - (time.time() - last_request_at)
     if wait > 0:
         time.sleep(wait)
+
+
+def _record_request_at_locked(key_index: int) -> None:
+    _last_request_at_by_key()[key_index] = time.time()
+
+
+def _error_summary(exc: Exception) -> str:
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"HTTP {exc.response.status_code}"
+    if isinstance(exc, httpx.TimeoutException):
+        return "timeout"
+    if isinstance(exc, httpx.RequestError):
+        return exc.__class__.__name__
+    return exc.__class__.__name__
 
 
 def search_news(query: str, *, ttl_sec: int | None = None, limit: int = 10, timeout_sec: int = 10) -> dict[str, Any]:
@@ -127,13 +154,13 @@ def search_news(query: str, *, ttl_sec: int | None = None, limit: int = 10, time
         for idx in order:
             key = keys[idx]
             try:
-                _wait_for_rate_limit_locked()
+                _wait_for_rate_limit_locked(idx)
                 response = httpx.get(
                     SERPAPI_URL,
                     params={"engine": engine, "q": query, "api_key": key},
                     timeout=timeout_sec,
                 )
-                _state["last_request_at"] = time.time()
+                _record_request_at_locked(idx)
                 response.raise_for_status()
                 payload = response.json()
                 items = _extract_items(payload, limit)
@@ -148,10 +175,10 @@ def search_news(query: str, *, ttl_sec: int | None = None, limit: int = 10, time
                     "items": items,
                     "serpapi_key_index": idx,
                     "serpapi_key_count": len(keys),
-                    "serpapi_key_preview": _key_preview(key),
                 }
             except Exception as exc:
-                errors.append({"key_index": idx, "key_preview": _key_preview(key), "error": str(exc)})
+                _record_request_at_locked(idx)
+                errors.append({"key_index": idx, "error": _error_summary(exc)})
                 _state["next_index"] = (idx + 1) % len(keys)
 
     return {"status": "error", "reason": "all_keys_failed", "query": query, "items": [], "errors": errors}
