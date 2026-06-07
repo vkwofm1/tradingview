@@ -18,6 +18,7 @@ def test_search_news_uses_ttl_cache_and_rotates_keys(monkeypatch):
     news_cache._cache.clear()
     news_cache._state["next_index"] = 0
     news_cache._state["last_request_at_by_key"] = {}
+    news_cache._state["failed_until_by_key"] = {}
     monkeypatch.setenv("SERPAPI_API_KEYS", "key-one,key-two")
     monkeypatch.setattr(news_cache, "MIN_INTERVAL_SEC", 0)
 
@@ -54,6 +55,7 @@ def test_search_news_does_not_wait_between_different_keys(monkeypatch):
     news_cache._cache.clear()
     news_cache._state["next_index"] = 0
     news_cache._state["last_request_at_by_key"] = {}
+    news_cache._state["failed_until_by_key"] = {}
     monkeypatch.setenv("SERPAPI_API_KEYS", "rate-limited-key,working-key")
     monkeypatch.setattr(news_cache, "MIN_INTERVAL_SEC", 30)
 
@@ -85,6 +87,7 @@ def test_search_news_error_summary_does_not_leak_api_key(monkeypatch):
     news_cache._cache.clear()
     news_cache._state["next_index"] = 0
     news_cache._state["last_request_at_by_key"] = {}
+    news_cache._state["failed_until_by_key"] = {}
     monkeypatch.setenv("SERPAPI_API_KEYS", "secret-key")
     monkeypatch.setattr(news_cache, "MIN_INTERVAL_SEC", 0)
 
@@ -100,3 +103,22 @@ def test_search_news_error_summary_does_not_leak_api_key(monkeypatch):
     assert result["status"] == "error"
     assert result["errors"] == [{"key_index": 0, "error": "HTTP 429"}]
     assert "secret-key" not in str(result)
+
+
+def test_search_news_returns_quickly_when_all_keys_are_cooling_down(monkeypatch):
+    news_cache._cache.clear()
+    news_cache._state["next_index"] = 0
+    news_cache._state["last_request_at_by_key"] = {0: news_cache.time.time()}
+    news_cache._state["failed_until_by_key"] = {1: news_cache.time.time() + 60}
+    monkeypatch.setenv("SERPAPI_API_KEYS", "recent-key,cooling-key")
+    monkeypatch.setattr(news_cache, "MIN_INTERVAL_SEC", 30)
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("external request should not be called")
+
+    monkeypatch.setattr(news_cache.httpx, "get", fail_if_called)
+
+    result = news_cache.search_news("btc", ttl_sec=3600)
+
+    assert result["status"] == "skipped"
+    assert result["reason"] == "no_key_available"
