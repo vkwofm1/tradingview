@@ -8,10 +8,11 @@ from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 
 from app import db, adoption_metrics
-from app.collectors import bithumb, crypto, naver_stocks, stocks, upbit
+from app.collectors import bithumb, crypto, dart_disclosures, naver_stocks, stocks, upbit
 from app.db_monitoring import get_database_health, get_database_stats, get_migration_readiness
 from app.mcp_server import build_mcp
 from app.monitoring import build_operations_dashboard
+from app.news_cache import search_news
 from app.runner import run_collector
 from app.scheduler import Scheduler
 from app.adoption_scheduler import AdoptionMetricsScheduler
@@ -22,6 +23,7 @@ COLLECTORS = {
     "naver_stocks": naver_stocks.collect,
     "upbit": upbit.collect,
     "bithumb": bithumb.collect,
+    "dart_disclosures": dart_disclosures.collect,
 }
 
 mcp = build_mcp()
@@ -128,6 +130,20 @@ def database_readiness():
         "checks": readiness["checks"],
         "recommendation": readiness["recommendation"],
     }
+
+
+@app.get("/news/search")
+def news_search(
+    q: str = Query(..., min_length=1, max_length=200),
+    ttl_sec: int = Query(7200, ge=3600, le=10800),
+    limit: int = Query(10, ge=1, le=20),
+):
+    """Return SerpApi Google News results through a 1-3h in-memory cache.
+
+    Results are not stored in the market DB. API keys rotate only on cache
+    misses, so repeated same-query callers share one external request.
+    """
+    return search_news(q, ttl_sec=ttl_sec, limit=limit)
 
 
 @app.post("/collect")
