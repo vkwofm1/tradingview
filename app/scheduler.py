@@ -30,6 +30,10 @@ def _interval_for(name: str) -> int:
         except ValueError:
             log.warning("Invalid SCHED_%s_INTERVAL=%r", name.upper(), per_collector)
 
+    if name == "dart_disclosures" and not (os.environ.get("DART_API_KEY") or os.environ.get("OPENDART_API_KEY")):
+        log.info("Scheduler skipping dart_disclosures because DART_API_KEY/OPENDART_API_KEY is not configured")
+        return 0
+
     global_override = os.environ.get("SCHED_INTERVAL_SEC")
     if global_override is not None:
         try:

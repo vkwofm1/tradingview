@@ -13,7 +13,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
 from app import db
-from app.collectors import bithumb, crypto, naver_stocks, stocks, upbit
+from app.collectors import bithumb, crypto, dart_disclosures, naver_stocks, stocks, upbit
 from app.runner import run_collector
 
 
@@ -77,6 +77,11 @@ def build_mcp() -> FastMCP:
     async def collect_global_crypto(ids: list[str] | None = None) -> Any:
         """Collect global crypto prices from CoinGecko (e.g. ['bitcoin', 'ethereum'])."""
         return await run_collector("crypto", crypto.collect, ids)
+
+    @mcp.tool()
+    async def collect_dart_disclosures(symbols: list[str] | None = None) -> Any:
+        """Collect Korean corporate disclosures from OpenDART. Pass stock codes, corp codes, or company names."""
+        return await run_collector("dart_disclosures", dart_disclosures.collect, symbols)
 
     @mcp.tool()
     def query_market_data(
