@@ -1,26 +1,33 @@
-"""SerpApi-backed news search with in-memory TTL cache.
+"""SerpApi-backed news search with monthly quota guard and TTL cache.
 
-This module intentionally does not persist results to DB. It centralizes all
-SerpApi usage for downstream trading clients so repeated same-query requests hit
-one 1-3 hour cache and API keys rotate across cache misses.
+SerpApi usage is centralized here so downstream trading clients share one
+cache, one key-rotation policy, and one quota guard. Results are not stored
+in the market DB; only monthly usage counters are persisted to a small JSON
+file so pod restarts do not reset API-budget accounting.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 from threading import Lock
 from typing import Any
 
 import httpx
 
-DEFAULT_TTL_SEC = int(os.getenv("SERPAPI_NEWS_CACHE_TTL_SEC", "7200"))
+DEFAULT_TTL_SEC = int(os.getenv("SERPAPI_NEWS_CACHE_TTL_SEC", "10800"))
 MIN_TTL_SEC = 3600
 MAX_TTL_SEC = 10800
-MIN_INTERVAL_SEC = float(os.getenv("SERPAPI_MIN_INTERVAL_SEC", "30"))
+MIN_INTERVAL_SEC = float(os.getenv("SERPAPI_MIN_INTERVAL_SEC", "10800"))
 REQUEST_TIMEOUT_SEC = float(os.getenv("SERPAPI_TIMEOUT_SEC", "6"))
 FAILURE_COOLDOWN_SEC = float(os.getenv("SERPAPI_FAILURE_COOLDOWN_SEC", "900"))
+MONTHLY_QUOTA_PER_KEY = int(os.getenv("SERPAPI_MONTHLY_QUOTA_PER_KEY", "250"))
+USAGE_STATE_PATH = os.getenv("SERPAPI_USAGE_STATE_PATH", "/app/data/serpapi_usage.json")
 SERPAPI_URL = "https://serpapi.com/search.json"
 
 _cache: dict[tuple[str, str], dict[str, Any]] = {}
@@ -54,6 +61,69 @@ def load_serpapi_keys() -> list[str]:
 def _clamp_ttl(ttl_sec: int | None) -> int:
     value = DEFAULT_TTL_SEC if ttl_sec is None else int(ttl_sec)
     return max(MIN_TTL_SEC, min(MAX_TTL_SEC, value))
+
+
+def _month_id() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m")
+
+
+def _key_id(key: str) -> str:
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+
+
+def _usage_path() -> Path:
+    return Path(USAGE_STATE_PATH)
+
+
+def _empty_usage() -> dict[str, Any]:
+    return {"month": _month_id(), "keys": {}}
+
+
+def _load_usage_locked() -> dict[str, Any]:
+    path = _usage_path()
+    try:
+        body = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        body = _empty_usage()
+    if not isinstance(body, dict) or body.get("month") != _month_id():
+        return _empty_usage()
+    if not isinstance(body.get("keys"), dict):
+        body["keys"] = {}
+    return body
+
+
+def _save_usage_locked(usage: dict[str, Any]) -> None:
+    path = _usage_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(usage, sort_keys=True), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _usage_record(usage: dict[str, Any], key: str) -> dict[str, Any]:
+    records = usage.setdefault("keys", {})
+    key_record = records.setdefault(_key_id(key), {"count": 0, "last_request_at": 0.0})
+    if not isinstance(key_record, dict):
+        key_record = {"count": 0, "last_request_at": 0.0}
+        records[_key_id(key)] = key_record
+    return key_record
+
+
+def _remaining_quota_locked(key: str) -> int:
+    if MONTHLY_QUOTA_PER_KEY <= 0:
+        return 0
+    usage = _load_usage_locked()
+    record = _usage_record(usage, key)
+    return max(0, MONTHLY_QUOTA_PER_KEY - int(record.get("count") or 0))
+
+
+def _record_external_attempt_locked(key: str) -> int:
+    usage = _load_usage_locked()
+    record = _usage_record(usage, key)
+    record["count"] = int(record.get("count") or 0) + 1
+    record["last_request_at"] = time.time()
+    _save_usage_locked(usage)
+    return max(0, MONTHLY_QUOTA_PER_KEY - int(record["count"]))
 
 
 def _extract_items(payload: dict[str, Any], limit: int) -> list[dict[str, Any]]:
@@ -123,8 +193,8 @@ def _error_summary(exc: Exception) -> str:
     return exc.__class__.__name__
 
 
-def _timeout() -> httpx.Timeout:
-    timeout = max(1.0, REQUEST_TIMEOUT_SEC)
+def _timeout(timeout_sec: int | float | None = None) -> httpx.Timeout:
+    timeout = max(1.0, float(REQUEST_TIMEOUT_SEC if timeout_sec is None else timeout_sec))
     return httpx.Timeout(timeout, connect=min(3.0, timeout))
 
 
@@ -153,13 +223,18 @@ def search_news(query: str, *, ttl_sec: int | None = None, limit: int = 10, time
 
     errors: list[dict[str, Any]] = []
     attempted = 0
+    quota_exhausted = 0
     start = int(_state.get("next_index") or 0) % len(keys)
     order = list(range(start, len(keys))) + list(range(0, start))
-    request_timeout = _timeout() if timeout_sec is None else httpx.Timeout(max(1.0, float(timeout_sec)), connect=min(3.0, max(1.0, float(timeout_sec))))
 
     for idx in order:
         key = keys[idx]
         with _lock:
+            remaining = _remaining_quota_locked(key)
+            if remaining <= 0:
+                quota_exhausted += 1
+                errors.append({"key_index": idx, "error": "monthly_quota_exhausted"})
+                continue
             now = time.time()
             failed_until = float(_state_dict("failed_until_by_key").get(idx, 0))
             if failed_until > now:
@@ -169,16 +244,16 @@ def search_news(query: str, *, ttl_sec: int | None = None, limit: int = 10, time
             if wait > 0:
                 errors.append({"key_index": idx, "error": "rate_limited"})
                 continue
+            remaining_after_attempt = _record_external_attempt_locked(key)
+            _record_request_locked(idx)
 
         attempted += 1
         try:
             response = httpx.get(
                 SERPAPI_URL,
                 params={"engine": engine, "q": query, "api_key": key},
-                timeout=request_timeout,
+                timeout=_timeout(timeout_sec),
             )
-            with _lock:
-                _record_request_locked(idx)
             response.raise_for_status()
             payload = response.json()
             items = _extract_items(payload, limit)
@@ -194,14 +269,17 @@ def search_news(query: str, *, ttl_sec: int | None = None, limit: int = 10, time
                 "items": items,
                 "serpapi_key_index": idx,
                 "serpapi_key_count": len(keys),
+                "serpapi_monthly_remaining_for_key": remaining_after_attempt,
             }
         except Exception as exc:
             with _lock:
-                _record_request_locked(idx)
                 _record_failure_locked(idx)
                 _state["next_index"] = (idx + 1) % len(keys)
             errors.append({"key_index": idx, "error": _error_summary(exc)})
 
-    reason = "no_key_available" if attempted == 0 else "all_keys_failed"
+    if attempted == 0 and quota_exhausted == len(keys):
+        reason = "monthly_quota_exhausted"
+    else:
+        reason = "no_key_available" if attempted == 0 else "all_keys_failed"
     status = "skipped" if attempted == 0 else "error"
     return {"status": status, "reason": reason, "query": query, "items": [], "errors": errors}

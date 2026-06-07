@@ -135,10 +135,10 @@ def database_readiness():
 @app.get("/news/search")
 def news_search(
     q: str = Query(..., min_length=1, max_length=200),
-    ttl_sec: int = Query(7200, ge=3600, le=10800),
+    ttl_sec: int = Query(10800, ge=3600, le=10800),
     limit: int = Query(10, ge=1, le=20),
 ):
-    """Return SerpApi Google News results through a 1-3h in-memory cache.
+    """Return SerpApi Google News results through a 1-3h in-memory cache with monthly quota guard.
 
     Results are not stored in the market DB. API keys rotate only on cache
     misses, so repeated same-query callers share one external request.

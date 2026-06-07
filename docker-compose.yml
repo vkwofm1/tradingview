@@ -30,8 +30,11 @@ services:
       DB_PATH: /app/data/data.db
       DATABASE_URL: ${DATABASE_URL:-postgresql://tradingview:tradingview_dev_password@postgres:5432/tradingview}
       SERPAPI_API_KEYS: ${SERPAPI_API_KEYS:-}
-      SERPAPI_NEWS_CACHE_TTL_SEC: ${SERPAPI_NEWS_CACHE_TTL_SEC:-7200}
-      SERPAPI_MIN_INTERVAL_SEC: ${SERPAPI_MIN_INTERVAL_SEC:-30}
+      SERPAPI_NEWS_CACHE_TTL_SEC: ${SERPAPI_NEWS_CACHE_TTL_SEC:-10800}
+      SERPAPI_MIN_INTERVAL_SEC: ${SERPAPI_MIN_INTERVAL_SEC:-10800}
+      SERPAPI_MONTHLY_QUOTA_PER_KEY: ${SERPAPI_MONTHLY_QUOTA_PER_KEY:-250}
+      SERPAPI_USAGE_STATE_PATH: ${SERPAPI_USAGE_STATE_PATH:-/app/data/serpapi_usage.json}
+      SERPAPI_TIMEOUT_SEC: ${SERPAPI_TIMEOUT_SEC:-6}
     depends_on:
       postgres:
         condition: service_healthy
