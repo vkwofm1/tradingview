@@ -7,10 +7,10 @@ import respx
 from fastapi.testclient import TestClient
 
 from app import db
-from app.collectors import bithumb, naver_stocks, upbit
+from app.collectors import bithumb, dart_disclosures, naver_stocks, upbit
 from app.main import app
 from app.mcp_server import build_mcp
-from app.scheduler import Scheduler
+from app.scheduler import Scheduler, _interval_for
 
 
 @pytest.fixture(autouse=True)
@@ -145,6 +145,86 @@ def test_api_health_endpoint_surfaces_upstream_failure(client):
 def test_collect_unknown_collector(client):
     resp = client.post("/collect", json={"collector": "nope"})
     assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_dart_disclosures_collects_filters_and_classifies(monkeypatch):
+    monkeypatch.setenv("DART_API_KEY", "test-key")
+    monkeypatch.setenv("DART_DISCLOSURE_BEGIN_DATE", "20260607")
+    monkeypatch.setenv("DART_DISCLOSURE_END_DATE", "20260607")
+
+    db.create_job("dart-job", "dart_disclosures")
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get("https://opendart.fss.or.kr/api/list.json").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "status": "000",
+                    "message": "OK",
+                    "page_no": 1,
+                    "total_page": 1,
+                    "list": [
+                        {
+                            "corp_code": "00126380",
+                            "corp_name": "Samsung Electronics",
+                            "stock_code": "005930",
+                            "report_nm": "주요사항보고서(전환사채권발행결정)",
+                            "rcept_no": "20260607000001",
+                            "flr_nm": "Samsung Electronics",
+                            "rcept_dt": "20260607",
+                            "rm": "",
+                        },
+                        {
+                            "corp_code": "00000000",
+                            "corp_name": "Filtered Out",
+                            "stock_code": "999999",
+                            "report_nm": "Quarterly Report",
+                            "rcept_no": "20260607000002",
+                            "rcept_dt": "20260607",
+                        },
+                    ],
+                },
+            )
+        )
+
+        count = await dart_disclosures.collect("dart-job", ["005930"])
+
+    assert count == 1
+    rows = db.query_market_data("dart_disclosures", "005930", 10)
+    assert len(rows) == 1
+    payload = rows[0]["payload"]
+    assert payload["importance"] == "high"
+    assert payload["category"] == "risk_or_control_event"
+    assert payload["source_url"].endswith("20260607000001")
+
+
+def test_dart_disclosures_scheduler_skips_without_api_key(monkeypatch):
+    monkeypatch.delenv("DART_API_KEY", raising=False)
+    monkeypatch.delenv("OPENDART_API_KEY", raising=False)
+    monkeypatch.delenv("SCHED_DART_DISCLOSURES_INTERVAL", raising=False)
+    monkeypatch.delenv("SCHED_INTERVAL_SEC", raising=False)
+
+    assert _interval_for("dart_disclosures") == 0
+
+    monkeypatch.setenv("DART_API_KEY", "test-key")
+    assert _interval_for("dart_disclosures") == 3600
+
+
+def test_dart_disclosures_registered_for_sync_collection(client, monkeypatch):
+    from app import main as app_main
+
+    async def fake_collect(job_id, symbols=None):
+        db.insert_market_data(job_id, "dart_disclosures", "005930", {"ok": True, "symbols": symbols})
+        return 1
+
+    monkeypatch.setitem(app_main.COLLECTORS, "dart_disclosures", fake_collect)
+
+    resp = client.post("/collect/sync", json={"collector": "dart_disclosures", "symbols": ["005930"]})
+
+    assert resp.status_code == 200
+    job = resp.json()
+    assert job["collector"] == "dart_disclosures"
+    assert job["status"] == "completed"
 
 
 def test_collect_creates_job(client, monkeypatch):
