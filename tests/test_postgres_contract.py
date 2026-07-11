@@ -85,6 +85,17 @@ def test_postgres_reads_close_the_transaction(monkeypatch):
     assert connection.rollbacks == 0
 
 
+def test_unknown_database_type_fails_closed(monkeypatch):
+    monkeypatch.setattr(db, "DB_TYPE", "unknown")
+
+    try:
+        db.init_db()
+    except RuntimeError as exc:
+        assert "Unsupported DB_TYPE" in str(exc)
+    else:
+        raise AssertionError("unknown database types must not fall back to SQLite")
+
+
 def test_postgres_candle_write_interprets_naive_history_as_kst(monkeypatch):
     captured = {}
 

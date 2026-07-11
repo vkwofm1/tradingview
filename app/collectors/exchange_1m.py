@@ -3,7 +3,7 @@
 invest-lead 회의 포트폴리오 선정 시 분단위 검증에 사용. paperclip의 LLM agent가
 MCP tool 또는 HTTP API로 즉시/일일 수집을 trigger.
 
-저장 위치: tradingview 자체 SQLite (DB_PATH, market_candles 테이블).
+저장 위치: TradingView PostgreSQL (DATABASE_URL, market_candles 테이블).
 schema: market_candles(collector, symbol, interval, candle_time, payload[JSON])
 payload: {"open","high","low","close","volume","ts_ms"}
 

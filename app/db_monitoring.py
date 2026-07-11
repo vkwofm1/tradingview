@@ -5,7 +5,7 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any
 
-DB_TYPE = os.environ.get("DB_TYPE", "sqlite").lower()
+DB_TYPE = os.environ.get("DB_TYPE", "postgres").lower()
 DB_PATH = os.environ.get("DB_PATH", "data.db")
 POSTGRES_URL = os.environ.get("DATABASE_URL", "").strip()
 
@@ -160,8 +160,14 @@ def get_database_health() -> dict[str, Any]:
     """Get health status for the current database."""
     if DB_TYPE == "postgres":
         return check_postgres_health()
-    else:
+    if DB_TYPE == "sqlite":
         return check_sqlite_health()
+    return {
+        "type": DB_TYPE,
+        "healthy": False,
+        "error": f"Unsupported DB_TYPE: {DB_TYPE!r}",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 def get_database_stats() -> dict[str, Any]:
@@ -260,7 +266,7 @@ def get_migration_readiness() -> dict[str, Any]:
             "recommendation": "SQLite healthy and ready for migration" if current_health.get("healthy") else "SQLite has issues - check integrity",
         }
 
-    else:
+    if DB_TYPE == "postgres":
         return {
             "ready": current_health.get("healthy", False),
             "database": "postgres",
@@ -271,3 +277,10 @@ def get_migration_readiness() -> dict[str, Any]:
             },
             "recommendation": "PostgreSQL ready and accepting connections" if current_health.get("healthy") else "PostgreSQL connection failed",
         }
+
+    return {
+        "ready": False,
+        "database": DB_TYPE,
+        "checks": {"configuration": False},
+        "recommendation": f"Unsupported DB_TYPE: {DB_TYPE!r}",
+    }

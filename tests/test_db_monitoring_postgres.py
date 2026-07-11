@@ -57,3 +57,15 @@ def test_health_skips_pg_stat_statements_query_when_extension_is_absent(monkeypa
         for query in connection.cursor_instance.queries
     )
     assert connection.closed is True
+
+
+def test_unknown_database_type_is_unhealthy(monkeypatch):
+    monkeypatch.setattr(db_monitoring, "DB_TYPE", "unknown")
+
+    health = db_monitoring.get_database_health()
+    readiness = db_monitoring.get_migration_readiness()
+
+    assert health["healthy"] is False
+    assert "Unsupported DB_TYPE" in health["error"]
+    assert readiness["ready"] is False
+    assert readiness["checks"] == {"configuration": False}

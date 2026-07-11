@@ -8,7 +8,9 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-DB_TYPE = os.environ.get("DB_TYPE", "sqlite").lower()
+# PostgreSQL is the production default. SQLite remains available only when a
+# test or one-off migration explicitly selects it with DB_TYPE=sqlite.
+DB_TYPE = os.environ.get("DB_TYPE", "postgres").lower()
 DB_PATH = Path(os.environ.get("DB_PATH", "data.db"))
 POSTGRES_URL = os.environ.get("DATABASE_URL", "").strip()
 
@@ -100,8 +102,10 @@ def _execute_postgres(sql: str, params: tuple = (), fetch_one: bool = False, fet
 def init_db() -> None:
     if DB_TYPE == "postgres":
         _init_postgres_db()
-    else:
+    elif DB_TYPE == "sqlite":
         _init_sqlite_db()
+    else:
+        raise RuntimeError(f"Unsupported DB_TYPE: {DB_TYPE!r}")
 
 
 def _init_sqlite_db() -> None:
