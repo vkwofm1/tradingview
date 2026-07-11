@@ -114,14 +114,16 @@ def check_postgres_health() -> dict[str, Any]:
         cursor.execute("SELECT pg_database_size(current_database())")
         db_size_bytes = cursor.fetchone()[0]
 
-        # Check for slow queries (if log is enabled)
-        try:
+        # Avoid issuing a failing query when the optional extension is absent.
+        cursor.execute(
+            "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements')"
+        )
+        if cursor.fetchone()[0]:
             cursor.execute(
                 "SELECT COUNT(*) FROM pg_stat_statements WHERE mean_exec_time > 1000"
             )
             slow_queries = cursor.fetchone()[0]
-        except psycopg.errors.UndefinedTable:
-            conn.rollback()
+        else:
             slow_queries = None
 
         conn.close()
