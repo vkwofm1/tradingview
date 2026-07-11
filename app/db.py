@@ -6,12 +6,25 @@ import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 DB_TYPE = os.environ.get("DB_TYPE", "sqlite").lower()
 DB_PATH = Path(os.environ.get("DB_PATH", "data.db"))
-POSTGRES_URL = os.environ.get("DATABASE_URL", "postgresql://user:password@localhost/tradingview")
+POSTGRES_URL = os.environ.get("DATABASE_URL", "").strip()
 
 _local = threading.local()
+KST = ZoneInfo("Asia/Seoul")
+NAIVE_CANDLE_TIMEZONES = {
+    "upbit": KST,
+    "upbit_1m": KST,
+    "bithumb": timezone.utc,
+    "bithumb_1m": KST,
+    "kis": KST,
+    "kis_daily": KST,
+    "kr_stock_1m": KST,
+    "us_stock_1m": KST,
+    "market_archive": timezone.utc,
+}
 
 
 def _get_sqlite_conn() -> sqlite3.Connection:
@@ -28,11 +41,20 @@ def _get_sqlite_conn() -> sqlite3.Connection:
 
 
 def _get_postgres_conn():
-    if not hasattr(_local, "postgres_conn"):
+    connection = getattr(_local, "postgres_conn", None)
+    if connection is None or connection.closed or connection.broken:
+        if not POSTGRES_URL:
+            raise RuntimeError("DATABASE_URL is required when DB_TYPE=postgres")
         import psycopg
         from psycopg.rows import dict_row
 
-        _local.postgres_conn = psycopg.connect(POSTGRES_URL, row_factory=dict_row)
+        _local.postgres_conn = psycopg.connect(
+            POSTGRES_URL,
+            row_factory=dict_row,
+            connect_timeout=10,
+            application_name="tradingview-crawl",
+        )
+        _local.postgres_conn.execute("SET TIME ZONE 'UTC'")
     return _local.postgres_conn
 
 
@@ -58,16 +80,21 @@ def _execute_postgres(sql: str, params: tuple = (), fetch_one: bool = False, fet
     """Execute SQL on PostgreSQL."""
     # Convert SQLite-style ? placeholders to PostgreSQL %s
     sql_pg = sql.replace("?", "%s")
-    cursor = _get_postgres_conn().cursor()
-    cursor.execute(sql_pg, params)
-    if fetch_one:
-        result = cursor.fetchone()
+    connection = _get_postgres_conn()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(sql_pg, params)
+            if fetch_one:
+                result = cursor.fetchone()
+            elif fetch_all:
+                result = cursor.fetchall()
+            else:
+                result = None
+        connection.commit()
         return result
-    elif fetch_all:
-        result = cursor.fetchall()
-        return result
-    else:
-        _get_postgres_conn().commit()
+    except Exception:
+        connection.rollback()
+        raise
 
 
 def init_db() -> None:
@@ -139,8 +166,8 @@ def _init_postgres_db() -> None:
             id          VARCHAR(255) PRIMARY KEY,
             collector   VARCHAR(255) NOT NULL,
             status      VARCHAR(50) NOT NULL DEFAULT 'pending',
-            created_at  TIMESTAMP NOT NULL,
-            finished_at TIMESTAMP,
+            created_at  TIMESTAMPTZ NOT NULL,
+            finished_at TIMESTAMPTZ,
             result_count INTEGER DEFAULT 0,
             error       TEXT
         )
@@ -153,7 +180,7 @@ def _init_postgres_db() -> None:
             collector   VARCHAR(255) NOT NULL,
             symbol      VARCHAR(255) NOT NULL,
             payload     TEXT NOT NULL,
-            collected_at TIMESTAMP NOT NULL
+            collected_at TIMESTAMPTZ NOT NULL
         )
     """)
 
@@ -164,9 +191,9 @@ def _init_postgres_db() -> None:
             collector    VARCHAR(255) NOT NULL,
             symbol       VARCHAR(255) NOT NULL,
             interval     VARCHAR(50) NOT NULL,
-            candle_time  TIMESTAMP NOT NULL,
+            candle_time  TIMESTAMPTZ NOT NULL,
             payload      TEXT NOT NULL,
-            collected_at TIMESTAMP NOT NULL,
+            collected_at TIMESTAMPTZ NOT NULL,
             UNIQUE (collector, symbol, interval, candle_time)
         )
     """)
@@ -188,7 +215,7 @@ def _init_postgres_db() -> None:
             source          TEXT NOT NULL DEFAULT '',
             requested_by    TEXT NOT NULL DEFAULT '',
             active          INTEGER NOT NULL DEFAULT 1,
-            updated_at      TIMESTAMP NOT NULL
+            updated_at      TIMESTAMPTZ NOT NULL
         )
     """)
 
@@ -283,12 +310,22 @@ def insert_market_candle(
     collector: str,
     symbol: str,
     interval: str,
-    candle_time: str,
+    candle_time: str | datetime,
     payload: Any,
 ) -> None:
     now = datetime.now(timezone.utc).isoformat()
 
     if DB_TYPE == "postgres":
+        parsed_candle_time = _parse_timestamp(candle_time)
+        if parsed_candle_time is None:
+            raise ValueError(f"invalid candle_time: {candle_time!r}")
+        if parsed_candle_time.tzinfo is None:
+            if collector not in NAIVE_CANDLE_TIMEZONES:
+                raise ValueError(f"unknown timezone for naive candle collector: {collector!r}")
+            parsed_candle_time = parsed_candle_time.replace(
+                tzinfo=NAIVE_CANDLE_TIMEZONES[collector]
+            )
+        canonical_candle_time = parsed_candle_time.astimezone(timezone.utc)
         _execute_postgres(
             """
             INSERT INTO market_candles (job_id, collector, symbol, interval, candle_time, payload, collected_at)
@@ -296,7 +333,7 @@ def insert_market_candle(
             ON CONFLICT(collector, symbol, interval, candle_time)
             DO UPDATE SET job_id=excluded.job_id, payload=excluded.payload, collected_at=excluded.collected_at
             """,
-            (job_id, collector, symbol, interval, candle_time, json.dumps(payload), now),
+            (job_id, collector, symbol, interval, canonical_candle_time, json.dumps(payload), now),
         )
     else:
         _execute_sqlite(
@@ -557,7 +594,7 @@ def query_market_candles(
     return result
 
 
-def _parse_timestamp(value: str | None) -> datetime | None:
+def _parse_timestamp(value: str | datetime | None) -> datetime | None:
     if not value:
         return None
     try:

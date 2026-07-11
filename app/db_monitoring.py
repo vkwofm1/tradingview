@@ -7,7 +7,7 @@ from typing import Any
 
 DB_TYPE = os.environ.get("DB_TYPE", "sqlite").lower()
 DB_PATH = os.environ.get("DB_PATH", "data.db")
-POSTGRES_URL = os.environ.get("DATABASE_URL", "postgresql://user:password@localhost/tradingview")
+POSTGRES_URL = os.environ.get("DATABASE_URL", "").strip()
 
 
 def check_sqlite_health() -> dict[str, Any]:
@@ -71,7 +71,13 @@ def check_postgres_health() -> dict[str, Any]:
     try:
         import psycopg
 
-        conn = psycopg.connect(POSTGRES_URL)
+        if not POSTGRES_URL:
+            raise RuntimeError("DATABASE_URL is required when DB_TYPE=postgres")
+        conn = psycopg.connect(
+            POSTGRES_URL,
+            connect_timeout=10,
+            application_name="tradingview-health",
+        )
         cursor = conn.cursor()
 
         # Server version
@@ -109,10 +115,14 @@ def check_postgres_health() -> dict[str, Any]:
         db_size_bytes = cursor.fetchone()[0]
 
         # Check for slow queries (if log is enabled)
-        cursor.execute(
-            "SELECT COUNT(*) FROM pg_stat_statements WHERE mean_exec_time > 1000"
-        )
-        slow_queries = cursor.fetchone()[0] if cursor else 0
+        try:
+            cursor.execute(
+                "SELECT COUNT(*) FROM pg_stat_statements WHERE mean_exec_time > 1000"
+            )
+            slow_queries = cursor.fetchone()[0]
+        except psycopg.errors.UndefinedTable:
+            conn.rollback()
+            slow_queries = None
 
         conn.close()
 
@@ -131,7 +141,7 @@ def check_postgres_health() -> dict[str, Any]:
             "database_size": db_size,
             "database_size_bytes": db_size_bytes,
             "active_connections": active_connections,
-            "slow_queries_detected": slow_queries > 0,
+            "slow_queries_detected": slow_queries > 0 if slow_queries is not None else None,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 

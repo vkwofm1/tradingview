@@ -21,11 +21,14 @@ def test_db():
 
     os.environ["DB_PATH"] = str(test_db_path)
     os.environ["DB_TYPE"] = "sqlite"
+    db.DB_PATH = test_db_path
+    db.DB_TYPE = "sqlite"
 
     # Reset the thread-local connection to force new connection
     db._local = __import__('threading').local()
 
     db.init_db()
+    adoption_metrics.init_adoption_db()
 
     yield
 

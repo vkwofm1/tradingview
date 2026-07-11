@@ -33,6 +33,7 @@ mcp_app = mcp.streamable_http_app()
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     db.init_db()
+    adoption_metrics.init_adoption_db()
     scheduler = Scheduler(COLLECTORS)
     adoption_scheduler = AdoptionMetricsScheduler()
     await scheduler.start()

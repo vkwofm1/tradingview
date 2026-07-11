@@ -125,7 +125,7 @@ def _init_postgres_adoption_db() -> None:
             survey_date         DATE NOT NULL,
             score               INTEGER,
             feedback            TEXT,
-            created_at          TIMESTAMP NOT NULL
+            created_at          TIMESTAMPTZ NOT NULL
         )
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_survey_respondent ON survey_responses(respondent_id)")
@@ -139,7 +139,7 @@ def _init_postgres_adoption_db() -> None:
             action_type         VARCHAR(100) NOT NULL,
             decision_id         VARCHAR(255),
             metadata            JSONB,
-            logged_at           TIMESTAMP NOT NULL
+            logged_at           TIMESTAMPTZ NOT NULL
         )
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_logs_user ON system_logs(user_id)")
@@ -154,7 +154,7 @@ def _init_postgres_adoption_db() -> None:
             active_users            INTEGER,
             total_decisions         INTEGER,
             framework_decisions     INTEGER,
-            calculated_at           TIMESTAMP NOT NULL
+            calculated_at           TIMESTAMPTZ NOT NULL
         )
     """)
 
@@ -167,7 +167,7 @@ def _init_postgres_adoption_db() -> None:
             engagement_index        NUMERIC(5,2),
             active_users            INTEGER,
             survey_responses_count  INTEGER,
-            calculated_at           TIMESTAMP NOT NULL
+            calculated_at           TIMESTAMPTZ NOT NULL
         )
     """)
 
@@ -180,7 +180,7 @@ def _init_postgres_adoption_db() -> None:
             engagement_index        NUMERIC(5,2),
             active_users            INTEGER,
             survey_responses_count  INTEGER,
-            calculated_at           TIMESTAMP NOT NULL
+            calculated_at           TIMESTAMPTZ NOT NULL
         )
     """)
 
@@ -192,8 +192,8 @@ def _init_postgres_adoption_db() -> None:
             survey_date         DATE NOT NULL,
             score               INTEGER,
             feedback            TEXT,
-            created_at          TIMESTAMP NOT NULL,
-            archived_at         TIMESTAMP NOT NULL
+            created_at          TIMESTAMPTZ NOT NULL,
+            archived_at         TIMESTAMPTZ NOT NULL
         )
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_survey_archive_date ON survey_responses_archive(survey_date)")
@@ -205,8 +205,8 @@ def _init_postgres_adoption_db() -> None:
             action_type         VARCHAR(100) NOT NULL,
             decision_id         VARCHAR(255),
             metadata            JSONB,
-            logged_at           TIMESTAMP NOT NULL,
-            archived_at         TIMESTAMP NOT NULL
+            logged_at           TIMESTAMPTZ NOT NULL,
+            archived_at         TIMESTAMPTZ NOT NULL
         )
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_logs_archive_time ON system_logs_archive(logged_at)")
@@ -218,7 +218,7 @@ def _init_postgres_adoption_db() -> None:
             period_start        DATE NOT NULL,
             period_end          DATE NOT NULL,
             summary             TEXT NOT NULL,
-            created_at          TIMESTAMP NOT NULL
+            created_at          TIMESTAMPTZ NOT NULL
         )
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_report_type ON archival_reports(report_type)")

@@ -64,9 +64,14 @@ def _last_ts_ms_from_db(collector: str, symbol: str, interval: str = "1m") -> in
     if not ct:
         return None
     try:
-        dt = datetime.strptime(ct, "%Y-%m-%d %H:%M:%S").replace(tzinfo=KST)
+        if isinstance(ct, datetime):
+            dt = ct
+        else:
+            dt = datetime.fromisoformat(str(ct).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=KST)
         return int(dt.timestamp() * 1000)
-    except Exception:
+    except (TypeError, ValueError):
         return None
 
 
