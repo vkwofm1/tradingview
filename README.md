@@ -20,7 +20,7 @@ Market data crawling server for stocks and crypto using FastAPI and Python.
 - **Python**: 3.11 이상
 - **pip**: Python 패키지 관리자
 - **Git**: 버전 관리
-- **PostgreSQL** (선택): PostgreSQL 16 이상 (SQLite 대신 사용 가능)
+- **PostgreSQL**: PostgreSQL 16 이상 (운영 데이터 단일 진실소스)
 
 ### 추천 요구사항
 
@@ -161,16 +161,16 @@ cat .env
 
 | 변수 | 설명 | 기본값 |
 |------|------|-------|
-| `DB_TYPE` | 데이터베이스 타입 (`sqlite` 또는 `postgres`) | `sqlite` |
-| `DB_PATH` | SQLite 데이터베이스 파일 경로 | `data.db` |
-| `DATABASE_URL` | PostgreSQL 연결 문자열 | - |
+| `DB_TYPE` | 데이터베이스 타입 (`postgres`; `sqlite`는 테스트/마이그레이션 전용) | `postgres` |
+| `DATABASE_URL` | PostgreSQL 연결 문자열 | 필수 |
 | `POSTGRES_PASSWORD` | PostgreSQL 비밀번호 | `tradingview_dev_password` |
 
 ## 데이터베이스 설정
 
-### SQLite (기본값)
+### SQLite (테스트/마이그레이션 호환 전용)
 
-SQLite는 추가 설정이 필요 없습니다. 자동으로 `data.db` 파일이 생성됩니다.
+SQLite는 운영 런타임에서 사용하지 않습니다. 격리된 단위 테스트나 과거 데이터
+마이그레이션에서만 명시적으로 선택합니다.
 
 ```bash
 # SQLite 사용 설정
@@ -212,9 +212,10 @@ docker-compose ps postgres
 docker-compose exec postgres psql -U tradingview -d tradingview
 ```
 
-#### 마이그레이션
+#### 마이그레이션 기록
 
-SQLite에서 PostgreSQL로 마이그레이션하는 경우:
+운영 마이그레이션은 2026-07-11 완료되었습니다. 아래 도구는 보존된 SQLite
+archive를 검증하거나 별도 개발 환경에서 이관을 재현할 때만 사용합니다.
 
 ```bash
 # 마이그레이션 스크립트 실행
@@ -343,7 +344,8 @@ docker build -t tradingview-crawl:latest .
 # Docker 컨테이너 실행
 docker run -d \
   -p 8509:8509 \
-  -e DB_TYPE=sqlite \
+  -e DB_TYPE=postgres \
+  -e DATABASE_URL=postgresql://tradingview:tradingview_dev_password@host.docker.internal:5432/tradingview \
   -v crawl-data:/app/data \
   --name tradingview-crawl \
   tradingview-crawl:latest

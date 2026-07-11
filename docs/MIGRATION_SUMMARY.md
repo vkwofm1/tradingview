@@ -1,5 +1,8 @@
 # PostgreSQL Migration Implementation Summary
 
+> Historical implementation summary. Production uses PostgreSQL exclusively
+> since 2026-07-11; SQLite examples below are test/migration references only.
+
 ## Overview
 
 Completed full implementation of SQLite → PostgreSQL migration infrastructure for the TradingView market data collection service. This document summarizes all changes made and provides a reference for the migration work.

@@ -1,5 +1,8 @@
 # SQLite Database Diagnosis and Recovery Guide
 
+> Legacy archive guide. The production database is PostgreSQL. Never mount the
+> archived SQLite file writable or use this document to restore it as runtime SoT.
+
 This guide explains how to diagnose and recover the SQLite database used by the market data collection service after corruption or issues.
 
 ## Database Location and Configuration

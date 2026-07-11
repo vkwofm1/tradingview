@@ -221,8 +221,8 @@ argocd app sync tradingview
 ```bash
 # .env 파일 생성
 cat > .env << EOF
-DB_TYPE=sqlite
-DB_PATH=/app/data/data.db
+DB_TYPE=postgres
+DATABASE_URL=postgresql://tradingview:tradingview_dev_password@postgres:5432/tradingview
 DEBUG=True
 LOG_LEVEL=DEBUG
 EOF
@@ -236,8 +236,7 @@ docker-compose up
 ```yaml
 # docker-compose.yml의 환경 변수
 environment:
-  DB_TYPE: ${DB_TYPE:-sqlite}
-  DB_PATH: /app/data/data.db
+  DB_TYPE: ${DB_TYPE:-postgres}
   DATABASE_URL: ${DATABASE_URL:-postgresql://...}
   POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tradingview_dev_password}
 ```
@@ -255,7 +254,7 @@ DEPLOY_SSH_KEY: ArgoCD 저장소 배포 키
 
 ```bash
 # 커맨드라인으로 오버라이드
-DB_TYPE=postgresql DATABASE_URL=postgresql://... docker-compose up
+DB_TYPE=postgres DATABASE_URL=postgresql://... docker-compose up
 
 # 또는 .env 파일 사용
 export $(cat .env | xargs)

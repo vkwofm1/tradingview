@@ -1,5 +1,8 @@
 # SQLite → PostgreSQL Migration Guide
 
+> Historical runbook. Production cutover completed on 2026-07-11. SQLite is now
+> retained read-only for audit; rollback means restoring PostgreSQL, not DB_TYPE=sqlite.
+
 This guide explains how to migrate the TradingView market data collection service from SQLite to PostgreSQL.
 
 ## Overview

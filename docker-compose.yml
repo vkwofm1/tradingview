@@ -26,8 +26,7 @@ services:
     volumes:
       - crawl-data:/app/data
     environment:
-      DB_TYPE: ${DB_TYPE:-sqlite}
-      DB_PATH: /app/data/data.db
+      DB_TYPE: ${DB_TYPE:-postgres}
       DATABASE_URL: ${DATABASE_URL:-postgresql://tradingview:tradingview_dev_password@postgres:5432/tradingview}
       SERPAPI_API_KEYS: ${SERPAPI_API_KEYS:-}
       SERPAPI_NEWS_CACHE_TTL_SEC: ${SERPAPI_NEWS_CACHE_TTL_SEC:-10800}

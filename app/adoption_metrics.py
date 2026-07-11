@@ -11,7 +11,7 @@ from . import db
 
 def init_adoption_db() -> None:
     """Initialize adoption metrics tables."""
-    if db.DB_TYPE == "postgres":
+    if db.is_postgres():
         _init_postgres_adoption_db()
     else:
         _init_sqlite_adoption_db()
@@ -237,7 +237,7 @@ def log_system_action(
     now = datetime.now(timezone.utc).isoformat()
     metadata_json = json.dumps(metadata) if metadata else None
 
-    if db.DB_TYPE == "postgres":
+    if db.is_postgres():
         db._execute_postgres(
             "INSERT INTO system_logs (user_id, action_type, decision_id, metadata, logged_at) VALUES (?, ?, ?, ?, ?)",
             (user_id, action_type, decision_id, metadata_json, now),
@@ -262,7 +262,7 @@ def record_survey_response(
 
     now = datetime.now(timezone.utc).isoformat()
 
-    if db.DB_TYPE == "postgres":
+    if db.is_postgres():
         db._execute_postgres(
             "INSERT INTO survey_responses (respondent_id, survey_type, survey_date, score, feedback, created_at) VALUES (?, ?, ?, ?, ?, ?)",
             (respondent_id, survey_type, survey_date, score, feedback, now),
@@ -283,7 +283,7 @@ def calculate_daily_metrics(target_date: str | None = None) -> dict[str, Any]:
     day_start = target_dt.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
     day_end = (target_dt + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
 
-    if db.DB_TYPE == "postgres":
+    if db.is_postgres():
         logs = db._execute_postgres(
             "SELECT DISTINCT user_id, action_type FROM system_logs WHERE logged_at >= ? AND logged_at < ?",
             (day_start, day_end),
@@ -325,7 +325,7 @@ def calculate_daily_metrics(target_date: str | None = None) -> dict[str, Any]:
 
     now = datetime.now(timezone.utc).isoformat()
 
-    if db.DB_TYPE == "postgres":
+    if db.is_postgres():
         db._execute_postgres(
             "INSERT INTO adoption_metrics_daily (metric_date, framework_usage_rate, active_users, total_decisions, framework_decisions, calculated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (metric_date) DO UPDATE SET framework_usage_rate = EXCLUDED.framework_usage_rate, active_users = EXCLUDED.active_users, total_decisions = EXCLUDED.total_decisions, framework_decisions = EXCLUDED.framework_decisions, calculated_at = EXCLUDED.calculated_at",
             (target_date, round(framework_usage_rate, 2), active_users, total_count, framework_count, now),
@@ -359,7 +359,7 @@ def calculate_weekly_metrics(week_start: str | None = None) -> dict[str, Any]:
     day_start = week_start_dt.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
     day_end = week_end_dt.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
 
-    if db.DB_TYPE == "postgres":
+    if db.is_postgres():
         logs = db._execute_postgres(
             "SELECT DISTINCT user_id, action_type FROM system_logs WHERE logged_at >= ? AND logged_at < ?",
             (day_start, day_end),
@@ -416,7 +416,7 @@ def calculate_weekly_metrics(week_start: str | None = None) -> dict[str, Any]:
 
     now = datetime.now(timezone.utc).isoformat()
 
-    if db.DB_TYPE == "postgres":
+    if db.is_postgres():
         db._execute_postgres(
             "INSERT INTO adoption_metrics_weekly (week_start, framework_usage_rate, decision_quality_score, engagement_index, active_users, survey_responses_count, calculated_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (week_start) DO UPDATE SET framework_usage_rate = EXCLUDED.framework_usage_rate, decision_quality_score = EXCLUDED.decision_quality_score, engagement_index = EXCLUDED.engagement_index, active_users = EXCLUDED.active_users, survey_responses_count = EXCLUDED.survey_responses_count, calculated_at = EXCLUDED.calculated_at",
             (week_start, round(framework_usage_rate, 2), decision_quality_score, round(engagement_index, 2), active_users, survey_count, now),
@@ -455,7 +455,7 @@ def calculate_monthly_metrics(month_start: str | None = None) -> dict[str, Any]:
     day_start = month_start_dt.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
     day_end = month_end_dt.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
 
-    if db.DB_TYPE == "postgres":
+    if db.is_postgres():
         logs = db._execute_postgres(
             "SELECT DISTINCT user_id, action_type FROM system_logs WHERE logged_at >= ? AND logged_at < ?",
             (day_start, day_end),
@@ -512,7 +512,7 @@ def calculate_monthly_metrics(month_start: str | None = None) -> dict[str, Any]:
 
     now = datetime.now(timezone.utc).isoformat()
 
-    if db.DB_TYPE == "postgres":
+    if db.is_postgres():
         db._execute_postgres(
             "INSERT INTO adoption_metrics_monthly (month_start, framework_usage_rate, decision_quality_score, engagement_index, active_users, survey_responses_count, calculated_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (month_start) DO UPDATE SET framework_usage_rate = EXCLUDED.framework_usage_rate, decision_quality_score = EXCLUDED.decision_quality_score, engagement_index = EXCLUDED.engagement_index, active_users = EXCLUDED.active_users, survey_responses_count = EXCLUDED.survey_responses_count, calculated_at = EXCLUDED.calculated_at",
             (month_start, round(framework_usage_rate, 2), decision_quality_score, round(engagement_index, 2), active_users, survey_count, now),
@@ -546,7 +546,7 @@ def _calculate_engagement_index(active_users: int, framework_usage_rate: float, 
 
 def get_daily_metrics(limit: int = 30) -> list[dict[str, Any]]:
     """Get recent daily metrics."""
-    if db.DB_TYPE == "postgres":
+    if db.is_postgres():
         rows = db._execute_postgres(
             "SELECT * FROM adoption_metrics_daily ORDER BY metric_date DESC LIMIT ?",
             (limit,),
@@ -564,7 +564,7 @@ def get_daily_metrics(limit: int = 30) -> list[dict[str, Any]]:
 
 def get_weekly_metrics(limit: int = 12) -> list[dict[str, Any]]:
     """Get recent weekly metrics (default: last 12 weeks)."""
-    if db.DB_TYPE == "postgres":
+    if db.is_postgres():
         rows = db._execute_postgres(
             "SELECT * FROM adoption_metrics_weekly ORDER BY week_start DESC LIMIT ?",
             (limit,),
@@ -582,7 +582,7 @@ def get_weekly_metrics(limit: int = 12) -> list[dict[str, Any]]:
 
 def get_monthly_metrics(limit: int = 12) -> list[dict[str, Any]]:
     """Get recent monthly metrics (default: last 12 months)."""
-    if db.DB_TYPE == "postgres":
+    if db.is_postgres():
         rows = db._execute_postgres(
             "SELECT * FROM adoption_metrics_monthly ORDER BY month_start DESC LIMIT ?",
             (limit,),
@@ -603,7 +603,7 @@ def archive_old_feedback(days_to_keep: int = 90) -> dict[str, Any]:
     cutoff_date = (datetime.now(timezone.utc) - timedelta(days=days_to_keep)).strftime("%Y-%m-%d")
     now = datetime.now(timezone.utc).isoformat()
 
-    if db.DB_TYPE == "postgres":
+    if db.is_postgres():
         survey_result = db._execute_postgres(
             "SELECT COUNT(*) as count FROM survey_responses WHERE survey_date < ?",
             (cutoff_date,),
@@ -689,7 +689,7 @@ def generate_monthly_report(month_start: str) -> dict[str, Any]:
         month_end_dt = month_start_dt.replace(month=month_start_dt.month + 1)
     month_end = month_end_dt.strftime("%Y-%m-%d")
 
-    if db.DB_TYPE == "postgres":
+    if db.is_postgres():
         metrics = db._execute_postgres(
             "SELECT * FROM adoption_metrics_monthly WHERE month_start = ?",
             (month_start,),
@@ -740,7 +740,7 @@ def generate_monthly_report(month_start: str) -> dict[str, Any]:
     now = datetime.now(timezone.utc).isoformat()
     summary_json = json.dumps(report_summary)
 
-    if db.DB_TYPE == "postgres":
+    if db.is_postgres():
         db._execute_postgres(
             "INSERT INTO archival_reports (report_type, period_start, period_end, summary, created_at) VALUES (?, ?, ?, ?, ?)",
             ("monthly", month_start, month_end, summary_json, now),
@@ -756,7 +756,7 @@ def generate_monthly_report(month_start: str) -> dict[str, Any]:
 
 def get_archival_reports(report_type: str = "monthly", limit: int = 12) -> list[dict[str, Any]]:
     """Get archived reports."""
-    if db.DB_TYPE == "postgres":
+    if db.is_postgres():
         rows = db._execute_postgres(
             "SELECT id, report_type, period_start, period_end, summary, created_at FROM archival_reports WHERE report_type = ? ORDER BY period_start DESC LIMIT ?",
             (report_type, limit),

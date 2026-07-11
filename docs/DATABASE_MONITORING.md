@@ -1,5 +1,8 @@
 # Database Monitoring Guide
 
+> Production monitoring targets PostgreSQL. SQLite examples are retained only
+> for isolated tests and validation of the read-only pre-cutover archive.
+
 Complete monitoring guide for SQLite and PostgreSQL databases in the TradingView market data collection service.
 
 ## Monitoring Endpoints

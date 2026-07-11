@@ -1,5 +1,8 @@
 # PostgreSQL Migration Quick Start
 
+> Legacy migration runbook. Production cutover completed on 2026-07-11.
+> Do not switch the runtime back to SQLite; the SQLite file is a read-only archive.
+
 ## TL;DR - 5-Minute Setup
 
 ### Option 1: Docker (Recommended)

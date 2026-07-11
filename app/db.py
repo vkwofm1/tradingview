@@ -29,6 +29,13 @@ NAIVE_CANDLE_TIMEZONES = {
 }
 
 
+def is_postgres() -> bool:
+    """Return the selected backend, rejecting configuration typos."""
+    if DB_TYPE not in {"postgres", "sqlite"}:
+        raise RuntimeError(f"Unsupported DB_TYPE: {DB_TYPE!r}")
+    return DB_TYPE == "postgres"
+
+
 def _get_sqlite_conn() -> sqlite3.Connection:
     db_path = str(DB_PATH)
     if getattr(_local, "sqlite_path", None) != db_path and hasattr(_local, "sqlite_conn"):
@@ -100,12 +107,10 @@ def _execute_postgres(sql: str, params: tuple = (), fetch_one: bool = False, fet
 
 
 def init_db() -> None:
-    if DB_TYPE == "postgres":
+    if is_postgres():
         _init_postgres_db()
-    elif DB_TYPE == "sqlite":
-        _init_sqlite_db()
     else:
-        raise RuntimeError(f"Unsupported DB_TYPE: {DB_TYPE!r}")
+        _init_sqlite_db()
 
 
 def _init_sqlite_db() -> None:
@@ -230,7 +235,7 @@ def _init_postgres_db() -> None:
 def create_job(job_id: str, collector: str) -> dict:
     now = datetime.now(timezone.utc).isoformat()
 
-    if DB_TYPE == "postgres":
+    if is_postgres():
         _execute_postgres(
             "INSERT INTO jobs (id, collector, status, created_at) VALUES (?, ?, 'running', ?)",
             (job_id, collector, now),
@@ -248,7 +253,7 @@ def finish_job(job_id: str, count: int, error: str | None = None) -> None:
     now = datetime.now(timezone.utc).isoformat()
     status = "failed" if error else "completed"
 
-    if DB_TYPE == "postgres":
+    if is_postgres():
         _execute_postgres(
             "UPDATE jobs SET status=?, finished_at=?, result_count=?, error=? WHERE id=?",
             (status, now, count, error, job_id),
@@ -261,7 +266,7 @@ def finish_job(job_id: str, count: int, error: str | None = None) -> None:
 
 
 def get_job(job_id: str) -> dict | None:
-    if DB_TYPE == "postgres":
+    if is_postgres():
         row = _execute_postgres(
             "SELECT * FROM jobs WHERE id=?",
             (job_id,),
@@ -278,7 +283,7 @@ def get_job(job_id: str) -> dict | None:
 
 
 def list_jobs(limit: int = 20) -> list[dict]:
-    if DB_TYPE == "postgres":
+    if is_postgres():
         rows = _execute_postgres(
             "SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?",
             (limit,),
@@ -297,7 +302,7 @@ def list_jobs(limit: int = 20) -> list[dict]:
 def insert_market_data(job_id: str, collector: str, symbol: str, payload: Any) -> None:
     now = datetime.now(timezone.utc).isoformat()
 
-    if DB_TYPE == "postgres":
+    if is_postgres():
         _execute_postgres(
             "INSERT INTO market_data (job_id, collector, symbol, payload, collected_at) VALUES (?,?,?,?,?)",
             (job_id, collector, symbol, json.dumps(payload), now),
@@ -319,7 +324,7 @@ def insert_market_candle(
 ) -> None:
     now = datetime.now(timezone.utc).isoformat()
 
-    if DB_TYPE == "postgres":
+    if is_postgres():
         parsed_candle_time = _parse_timestamp(candle_time)
         if parsed_candle_time is None:
             raise ValueError(f"invalid candle_time: {candle_time!r}")
@@ -426,7 +431,7 @@ def upsert_collection_policy(
         1 if policy["active"] else 0,
         policy["updated_at"],
     )
-    if DB_TYPE == "postgres":
+    if is_postgres():
         _execute_postgres(sql, params)
     else:
         _execute_sqlite(sql, params)
@@ -434,7 +439,7 @@ def upsert_collection_policy(
 
 
 def get_collection_policy(collector: str) -> dict | None:
-    if DB_TYPE == "postgres":
+    if is_postgres():
         row = _execute_postgres(
             "SELECT * FROM collection_policies WHERE collector=?",
             (collector,),
@@ -464,7 +469,7 @@ def get_collection_policy(collector: str) -> dict | None:
 
 
 def list_collection_policies() -> list[dict]:
-    if DB_TYPE == "postgres":
+    if is_postgres():
         rows = _execute_postgres(
             "SELECT collector FROM collection_policies ORDER BY collector",
             fetch_all=True,
@@ -537,7 +542,7 @@ def query_market_data(
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     params.append(limit)
 
-    if DB_TYPE == "postgres":
+    if is_postgres():
         rows = _execute_postgres(
             f"SELECT * FROM market_data {where} ORDER BY collected_at DESC LIMIT ?",
             tuple(params),
@@ -577,7 +582,7 @@ def query_market_candles(
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     params.append(limit)
 
-    if DB_TYPE == "postgres":
+    if is_postgres():
         rows = _execute_postgres(
             f"SELECT * FROM market_candles {where} ORDER BY candle_time DESC LIMIT ?",
             tuple(params),
@@ -663,7 +668,7 @@ def get_risk_dashboard(
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
 
-    if DB_TYPE == "postgres":
+    if is_postgres():
         job_rows = _execute_postgres(
             "SELECT * FROM jobs ORDER BY created_at DESC",
             fetch_all=True,
@@ -918,7 +923,7 @@ def get_job_failure_rates(
     now = datetime.now(timezone.utc)
     window_start = now - timedelta(hours=lookback_hours)
 
-    if DB_TYPE == "postgres":
+    if is_postgres():
         rows = _execute_postgres(
             "SELECT collector, status, created_at, error FROM jobs ORDER BY created_at DESC",
             fetch_all=True,

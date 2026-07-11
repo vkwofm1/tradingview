@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from app import db
+from app import adoption_metrics, db
 
 
 class _Cursor:
@@ -94,6 +94,31 @@ def test_unknown_database_type_fails_closed(monkeypatch):
         assert "Unsupported DB_TYPE" in str(exc)
     else:
         raise AssertionError("unknown database types must not fall back to SQLite")
+
+
+def test_unknown_database_type_cannot_reach_crud_fallback(monkeypatch):
+    monkeypatch.setattr(db, "DB_TYPE", "unknown")
+    monkeypatch.setattr(
+        db,
+        "_execute_sqlite",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("SQLite fallback must not run")
+        ),
+    )
+
+    try:
+        db.create_job("job-1", "test")
+    except RuntimeError as exc:
+        assert "Unsupported DB_TYPE" in str(exc)
+    else:
+        raise AssertionError("unknown database types must fail before CRUD dispatch")
+
+    try:
+        adoption_metrics.log_system_action("user-1", "test")
+    except RuntimeError as exc:
+        assert "Unsupported DB_TYPE" in str(exc)
+    else:
+        raise AssertionError("adoption metrics must use the validated DB dispatcher")
 
 
 def test_postgres_candle_write_interprets_naive_history_as_kst(monkeypatch):
