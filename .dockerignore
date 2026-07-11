@@ -5,3 +5,6 @@ __pycache__
 *.pyc
 data.db
 *.db
+*.db-shm
+*.db-wal
+*.sqlite3

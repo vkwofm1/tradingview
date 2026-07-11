@@ -344,6 +344,7 @@ docker build -t tradingview-crawl:latest .
 # Docker 컨테이너 실행
 docker run -d \
   -p 8509:8509 \
+  --add-host=host.docker.internal:host-gateway \
   -e DB_TYPE=postgres \
   -e DATABASE_URL=postgresql://tradingview:tradingview_dev_password@host.docker.internal:5432/tradingview \
   -v crawl-data:/app/data \
