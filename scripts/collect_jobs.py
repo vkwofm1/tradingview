@@ -9,6 +9,7 @@ import argparse
 import asyncio
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -19,8 +20,23 @@ from app.collectors import bithumb, crypto, naver_stocks, stocks, upbit
 from app.runner import run_collector
 
 
-def _print(payload):
-    print(json.dumps(payload, ensure_ascii=False, indent=2), flush=True)
+def _json_default(value: object) -> str:
+    """Serialize datetime values returned by PostgreSQL deterministically."""
+    if isinstance(value, datetime):
+        return value.isoformat()
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
+def _print(payload: object) -> None:
+    print(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            indent=2,
+            default=_json_default,
+        ),
+        flush=True,
+    )
 
 
 async def cmd_krw_1m(args):
