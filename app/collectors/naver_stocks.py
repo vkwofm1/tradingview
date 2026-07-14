@@ -6,8 +6,11 @@ Strategy:
 - Concurrency is bounded by a semaphore to avoid hammering Naver.
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
+import math
 import os
 import random
 
@@ -41,6 +44,10 @@ _DEFAULT_CONCURRENCY = 1
 _DEFAULT_REQUEST_DELAY_SEC = 1.25
 _DEFAULT_REQUEST_JITTER_SEC = 0.75
 log = logging.getLogger(__name__)
+
+
+class NaverPriceContractError(RuntimeError):
+    """Raised when no Naver quote satisfies the required price contract."""
 
 
 def _env_float(name: str, default: float) -> float:
@@ -84,7 +91,7 @@ async def _fetch_top_kospi(client: httpx.AsyncClient, page_size: int = 100) -> l
     return codes or list(FALLBACK_SYMBOLS)
 
 
-def _safe_float(val: str | int | float | None) -> float | None:
+def _safe_float(val: object) -> float | None:
     if val is None:
         return None
     try:
@@ -93,7 +100,20 @@ def _safe_float(val: str | int | float | None) -> float | None:
         return None
 
 
-async def _fetch_quote(client: httpx.AsyncClient, code: str) -> dict | None:
+def _valid_current_price(val: object) -> float | None:
+    """Return a normalized finite positive price, or None when invalid."""
+    if isinstance(val, bool):
+        return None
+    price = _safe_float(val)
+    if price is None or not math.isfinite(price) or price <= 0:
+        return None
+    return price
+
+
+async def _fetch_quote(
+    client: httpx.AsyncClient,
+    code: str,
+) -> dict[str, object] | None:
     """Fetch single-stock quote from the mobile integration endpoint."""
     resp = await client.get(QUOTE_URL.format(code=code))
     resp.raise_for_status()
@@ -111,14 +131,21 @@ async def _fetch_quote(client: httpx.AsyncClient, code: str) -> dict | None:
         if isinstance(item, dict) and item.get("code"):
             total_infos[item["code"]] = item.get("value")
 
-    raw_price = (
-        inner.get("closePrice")
-        or inner.get("currentPrice")
-        or inner.get("nv")
-        or inner.get("stockPrice")
-        or inner.get("price")
-        or total_infos.get("closePrice")
-        or total_infos.get("nowPrice")
+    raw_price = next(
+        (
+            value
+            for value in (
+                inner.get("closePrice"),
+                inner.get("currentPrice"),
+                inner.get("nv"),
+                inner.get("stockPrice"),
+                inner.get("price"),
+                total_infos.get("closePrice"),
+                total_infos.get("nowPrice"),
+            )
+            if value is not None
+        ),
+        None,
     )
     if raw_price is None:
         log.warning(
@@ -127,8 +154,9 @@ async def _fetch_quote(client: httpx.AsyncClient, code: str) -> dict | None:
         )
         return None
 
-    current_price = _safe_float(raw_price)
+    current_price = _valid_current_price(raw_price)
     if current_price is None:
+        log.warning("naver_stocks: invalid current price for %s", code)
         return None
 
     return {
@@ -158,7 +186,7 @@ async def collect(job_id: str, symbols: list[str] | None = None) -> int:
         jitter_sec = _env_float("STOCK_REQUEST_JITTER_SEC", _DEFAULT_REQUEST_JITTER_SEC)
         sem = asyncio.Semaphore(concurrency)
         spacing_lock = asyncio.Lock()
-        results: list[tuple[str, dict]] = []
+        results: list[tuple[str, dict[str, object]]] = []
 
         async def _one(index: int, code: str) -> None:
             async with sem:
@@ -178,22 +206,41 @@ async def collect(job_id: str, symbols: list[str] | None = None) -> int:
         await asyncio.gather(*(_one(index, code) for index, code in enumerate(codes)))
 
     if not results and codes:
-        if errors:
+        if errors and not missing_price:
             raise RuntimeError(
                 f"naver_stocks: 0/{len(codes)} succeeded. "
                 f"errors (first 2): {errors[:2]}"
             )
-        raise RuntimeError(
+        raise NaverPriceContractError(
             f"naver_stocks: 0/{len(codes)} succeeded. "
-            f"no price field found for any symbol (first 2: {missing_price[:2]}). "
+            "no valid positive finite current_price found for any symbol "
+            f"(first 2: {missing_price[:2]}). "
             f"Check QUOTE_URL={QUOTE_URL!r} and response structure."
         )
 
-    count = 0
+    prepared: list[tuple[str, dict[str, object]]] = []
+    policy_approved_count = 0
+    invalid_after_policy: list[str] = []
     for code, payload in results:
         filtered = db.apply_collection_policy("naver_stocks", code, payload)
         if filtered is None:
             continue
-        db.insert_market_data(job_id, "naver_stocks", code, filtered)
-        count += 1
-    return count
+        policy_approved_count += 1
+        current_price = _valid_current_price(filtered.get("current_price"))
+        if current_price is None:
+            invalid_after_policy.append(code)
+            continue
+        normalized = dict(filtered)
+        normalized["current_price"] = current_price
+        prepared.append((code, normalized))
+
+    if policy_approved_count and not prepared:
+        raise NaverPriceContractError(
+            "naver_stocks: collection policy removed or invalidated "
+            f"current_price for all {policy_approved_count} approved rows "
+            f"(first 2: {invalid_after_policy[:2]})"
+        )
+
+    for code, payload in prepared:
+        db.insert_market_data(job_id, "naver_stocks", code, payload)
+    return len(prepared)

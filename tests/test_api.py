@@ -10,6 +10,7 @@ from app import db
 from app.collectors import bithumb, dart_disclosures, naver_stocks, upbit
 from app.main import app
 from app.mcp_server import build_mcp
+from app.runner import run_collector
 from app.scheduler import Scheduler, _interval_for
 
 
@@ -552,6 +553,129 @@ async def test_naver_collect_skips_error_responses():
     assert count == 1
     rows = db.query_market_data("naver_stocks", "005930", 5)
     assert rows[0]["payload"]["name"] == "삼성전자"
+    assert db.query_market_data("naver_stocks", "000660", 5) == []
+
+
+@pytest.mark.asyncio
+async def test_naver_collection_policy_without_current_price_fails_atomically(
+    monkeypatch,
+):
+    monkeypatch.setenv("STOCK_REQUEST_DELAY_SEC", "0")
+    monkeypatch.setenv("STOCK_REQUEST_JITTER_SEC", "0")
+    db.upsert_collection_policy(
+        "naver_stocks",
+        include_fields=["change", "change_rate", "volume", "trade_date"],
+    )
+
+    with respx.mock(assert_all_called=True) as mock:
+        for code, price in (("005930", "75000"), ("000660", "150000")):
+            mock.get(
+                f"https://m.stock.naver.com/api/stock/{code}/basic"
+            ).mock(
+                return_value=httpx.Response(
+                    200,
+                    json={"stockName": code, "closePrice": price},
+                )
+            )
+
+        job = await run_collector(
+            "naver_stocks",
+            naver_stocks.collect,
+            ["005930", "000660"],
+        )
+
+    assert job["status"] == "failed"
+    assert job["result_count"] == 0
+    assert "current_price" in job["error"]
+    assert db.query_market_data("naver_stocks", limit=10) == []
+
+
+@pytest.mark.asyncio
+async def test_naver_collection_policy_preserves_current_price_and_completes():
+    db.upsert_collection_policy(
+        "naver_stocks",
+        include_fields=["current_price", "change"],
+    )
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get("https://m.stock.naver.com/api/stock/005930/basic").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "stockName": "삼성전자",
+                    "closePrice": "75000",
+                    "compareToPreviousClosePrice": "1000",
+                },
+            )
+        )
+
+        job = await run_collector(
+            "naver_stocks",
+            naver_stocks.collect,
+            ["005930"],
+        )
+
+    assert job["status"] == "completed"
+    assert job["result_count"] == 1
+    rows = db.query_market_data("naver_stocks", "005930", 5)
+    assert len(rows) == 1
+    assert rows[0]["payload"]["current_price"] == 75000.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "raw_price",
+    [None, 0, -1, "not-a-number", "NaN", "Infinity"],
+    ids=["none", "zero", "negative", "non-numeric", "nan", "infinity"],
+)
+async def test_naver_invalid_current_price_fails_closed(raw_price):
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get("https://m.stock.naver.com/api/stock/005930/basic").mock(
+            return_value=httpx.Response(
+                200,
+                json={"stockName": "삼성전자", "closePrice": raw_price},
+            )
+        )
+
+        job = await run_collector(
+            "naver_stocks",
+            naver_stocks.collect,
+            ["005930"],
+        )
+
+    assert job["status"] == "failed"
+    assert job["result_count"] == 0
+    assert db.query_market_data("naver_stocks", "005930", 5) == []
+
+
+@pytest.mark.asyncio
+async def test_naver_partial_valid_results_store_only_valid_rows(monkeypatch):
+    monkeypatch.setenv("STOCK_REQUEST_DELAY_SEC", "0")
+    monkeypatch.setenv("STOCK_REQUEST_JITTER_SEC", "0")
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get("https://m.stock.naver.com/api/stock/005930/basic").mock(
+            return_value=httpx.Response(
+                200,
+                json={"stockName": "삼성전자", "closePrice": "75000"},
+            )
+        )
+        mock.get("https://m.stock.naver.com/api/stock/000660/basic").mock(
+            return_value=httpx.Response(
+                200,
+                json={"stockName": "SK하이닉스", "closePrice": "NaN"},
+            )
+        )
+
+        job = await run_collector(
+            "naver_stocks",
+            naver_stocks.collect,
+            ["005930", "000660"],
+        )
+
+    assert job["status"] == "completed"
+    assert job["result_count"] == 1
+    assert len(db.query_market_data("naver_stocks", "005930", 5)) == 1
     assert db.query_market_data("naver_stocks", "000660", 5) == []
 
 
