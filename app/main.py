@@ -8,7 +8,15 @@ from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 
 from app import db, adoption_metrics
-from app.collectors import bithumb, crypto, dart_disclosures, naver_stocks, stocks, upbit
+from app.collectors import (
+    bithumb,
+    crypto,
+    dart_disclosures,
+    naver_kis_canary_universe,
+    naver_stocks,
+    stocks,
+    upbit,
+)
 from app.db_monitoring import get_database_health, get_database_stats, get_migration_readiness
 from app.mcp_server import build_mcp
 from app.monitoring import build_operations_dashboard
@@ -21,6 +29,7 @@ COLLECTORS = {
     "crypto": crypto.collect,
     "stocks": stocks.collect,
     "naver_stocks": naver_stocks.collect,
+    "naver_kis_canary_universe": naver_kis_canary_universe.collect,
     "upbit": upbit.collect,
     "bithumb": bithumb.collect,
     "dart_disclosures": dart_disclosures.collect,
