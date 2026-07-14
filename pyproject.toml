@@ -25,5 +25,9 @@ dev = [
     "httpx",
 ]
 
+[tool.setuptools.packages.find]
+include = ["app*"]
+exclude = ["tests*", "vector_store*"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
