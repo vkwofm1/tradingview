@@ -315,6 +315,53 @@ async def test_late_upstream_shape_change_is_atomic():
 
 
 @pytest.mark.asyncio
+async def test_one_row_pagination_drift_is_bounded_and_accepted():
+    kospi_first_page = [_stock("005930", volume="100")]
+    kospi_first_page.extend(
+        _stock(f"{300000 + index:06d}", stock_end_type="etf") for index in range(99)
+    )
+    with respx.mock(assert_all_called=True) as mock:
+        _mock_market_page(mock, "KOSPI", 1, 101, kospi_first_page)
+        _mock_market_page(mock, "KOSPI", 2, 101, [])
+        _mock_market_page(
+            mock,
+            "KOSDAQ",
+            1,
+            1,
+            [_stock("035720", volume="200")],
+        )
+
+        job = await run_collector(collector.COLLECTOR_NAME, collector.collect)
+
+    assert job["status"] == "completed"
+    assert job["result_count"] == 2
+    assert {
+        row["symbol"] for row in db.query_market_data(collector.COLLECTOR_NAME)
+    } == {
+        "005930",
+        "035720",
+    }
+
+
+@pytest.mark.asyncio
+async def test_excessive_pagination_drift_still_fails_closed():
+    kospi_first_page = [_stock("005930", volume="100")]
+    kospi_first_page.extend(
+        _stock(f"{300000 + index:06d}", stock_end_type="etf") for index in range(99)
+    )
+    with respx.mock(assert_all_called=True) as mock:
+        _mock_market_page(mock, "KOSPI", 1, 110, kospi_first_page)
+        _mock_market_page(mock, "KOSPI", 2, 110, [])
+
+        job = await run_collector(collector.COLLECTOR_NAME, collector.collect)
+
+    assert job["status"] == "failed"
+    assert job["result_count"] == 0
+    assert "allowed drift" in job["error"]
+    assert db.query_market_data(collector.COLLECTOR_NAME, limit=10) == []
+
+
+@pytest.mark.asyncio
 async def test_manual_symbols_are_rejected_without_http_requests():
     with respx.mock(assert_all_called=True):
         job = await run_collector(

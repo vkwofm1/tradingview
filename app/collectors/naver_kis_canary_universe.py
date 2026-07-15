@@ -50,6 +50,8 @@ _MAX_REQUEST_ATTEMPTS = 5
 _DEFAULT_RETRY_DELAY_SEC = 1.0
 _MAX_RETRY_DELAY_SEC = 10.0
 _RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+_MAX_PAGINATION_DRIFT_RATIO = 0.002
+_MAX_PAGINATION_DRIFT_ROWS = 5
 _CODE_RE = re.compile(r"\d{6}")
 log = logging.getLogger(__name__)
 
@@ -202,6 +204,16 @@ def _total_count(body: dict[str, object], market: str, page: int) -> int:
     return value
 
 
+def _allowed_pagination_drift(total_count: int) -> int:
+    return max(
+        1,
+        min(
+            _MAX_PAGINATION_DRIFT_ROWS,
+            math.ceil(total_count * _MAX_PAGINATION_DRIFT_RATIO),
+        ),
+    )
+
+
 async def _request_spacing(delay_sec: float, jitter_sec: float) -> None:
     wait = delay_sec + (random.uniform(0.0, jitter_sec) if jitter_sec else 0.0)
     if wait > 0:
@@ -339,10 +351,23 @@ async def _fetch_market(
         raise NaverKisCanaryUniverseValidationError(
             f"{market}: Naver universe is empty"
         )
-    if len(rows) != expected_total:
+    row_delta = len(rows) - expected_total
+    allowed_drift = _allowed_pagination_drift(expected_total)
+    if abs(row_delta) > allowed_drift:
         raise NaverKisCanaryUniverseShapeError(
             f"{market}: pagination returned {len(rows)} rows for "
-            f"totalCount={expected_total}"
+            f"totalCount={expected_total}; allowed drift is {allowed_drift}"
+        )
+    if row_delta:
+        log.warning(
+            "%s: accepting bounded %s pagination drift: rows=%d, "
+            "totalCount=%d, delta=%+d, allowed=%d",
+            COLLECTOR_NAME,
+            market,
+            len(rows),
+            expected_total,
+            row_delta,
+            allowed_drift,
         )
     return rows
 
