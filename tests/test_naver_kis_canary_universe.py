@@ -39,6 +39,7 @@ def _stock(
     as_of: object = "2026-07-14T15:30:00+09:00",
     name: str | None = None,
     use_current_price: bool = False,
+    reported_market: str | None = None,
 ) -> dict[str, object]:
     row: dict[str, object] = {
         "itemCode": code,
@@ -48,6 +49,14 @@ def _stock(
         "localTradedAt": as_of,
         "marketStatus": market_status,
     }
+    if reported_market is not None:
+        market = reported_market.upper()
+        row["sosok"] = "0" if market == "KOSPI" else "1"
+        row["stockExchangeType"] = {
+            "code": "KS" if market == "KOSPI" else "KQ",
+            "nameEng": market,
+            "name": market,
+        }
     row["currentPrice" if use_current_price else "closePriceRaw"] = price
     return row
 
@@ -79,8 +88,7 @@ async def test_collects_both_markets_with_bounded_pagination_filters_and_ranks(
         _stock("005930", price="9,900", volume="100", name="eligible-low-price")
     ]
     kospi_first_page.extend(
-        _stock(f"{300000 + index:06d}", stock_end_type="etf")
-        for index in range(99)
+        _stock(f"{300000 + index:06d}", stock_end_type="etf") for index in range(99)
     )
     kosdaq_rows = [
         _stock("035720", price="8,000", volume="300", name="rank-one"),
@@ -126,12 +134,120 @@ async def test_collects_both_markets_with_bounded_pagination_filters_and_ranks(
     assert by_code["000660"]["source"] == "naver_market_value"
     assert by_code["000660"]["provenance"] == {
         "endpoint": collector.MARKET_VALUE_URL.format(market="KOSPI"),
+        "requested_market": "KOSPI",
+        "reported_market": None,
         "page": 2,
         "page_size": 100,
         "total_count": 101,
         "price_field": "closePriceRaw",
         "volume_field": "accumulatedTradingVolumeRaw",
     }
+
+
+@pytest.mark.asyncio
+async def test_duplicate_code_is_collapsed_to_newest_reported_market_row(monkeypatch):
+    monkeypatch.setenv("NAVER_KIS_CANARY_UNIVERSE_TOP_N", "10")
+    with respx.mock(assert_all_called=True) as mock:
+        _mock_market_page(
+            mock,
+            "KOSPI",
+            1,
+            1,
+            [
+                _stock(
+                    "900290",
+                    name="GRT",
+                    price="2,405",
+                    volume="470,140",
+                    as_of="2026-07-14T15:29:00+09:00",
+                    reported_market="KOSDAQ",
+                )
+            ],
+        )
+        _mock_market_page(
+            mock,
+            "KOSDAQ",
+            1,
+            1,
+            [
+                _stock(
+                    "900290",
+                    name="GRT",
+                    price="2,420",
+                    volume="403,982",
+                    as_of="2026-07-15T15:30:00+09:00",
+                    reported_market="KOSDAQ",
+                )
+            ],
+        )
+
+        job = await run_collector(collector.COLLECTOR_NAME, collector.collect)
+
+    assert job["status"] == "completed"
+    assert job["result_count"] == 1
+    rows = db.query_market_data(collector.COLLECTOR_NAME, limit=10)
+    assert len(rows) == 1
+    payload = rows[0]["payload"]
+    assert payload["market"] == "KOSDAQ"
+    assert payload["current_price"] == 2420.0
+    assert payload["provenance"]["requested_market"] == "KOSDAQ"
+    assert payload["provenance"]["reported_market"] == "KOSDAQ"
+    assert payload["provenance"]["duplicates_collapsed"] == 1
+    assert payload["provenance"]["duplicate_sources"] == [
+        {"requested_market": "KOSPI", "page": 1},
+        {"requested_market": "KOSDAQ", "page": 1},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_duplicate_code_with_conflicting_names_fails_closed():
+    with respx.mock(assert_all_called=True) as mock:
+        _mock_market_page(
+            mock,
+            "KOSPI",
+            1,
+            1,
+            [_stock("900290", name="GRT-A", reported_market="KOSDAQ")],
+        )
+        _mock_market_page(
+            mock,
+            "KOSDAQ",
+            1,
+            1,
+            [_stock("900290", name="GRT-B", reported_market="KOSDAQ")],
+        )
+
+        job = await run_collector(collector.COLLECTOR_NAME, collector.collect)
+
+    assert job["status"] == "failed"
+    assert job["result_count"] == 0
+    assert "conflicting names" in job["error"]
+    assert db.query_market_data(collector.COLLECTOR_NAME, limit=10) == []
+
+
+@pytest.mark.asyncio
+async def test_transient_timeout_retries_the_same_page(monkeypatch):
+    monkeypatch.setenv("NAVER_KIS_CANARY_RETRY_DELAY_SEC", "0.1")
+    with respx.mock(assert_all_called=True) as mock:
+        kospi = mock.get(
+            collector.MARKET_VALUE_URL.format(market="KOSPI"),
+            params={"page": 1, "pageSize": collector.PAGE_SIZE},
+        ).mock(
+            side_effect=[
+                httpx.ReadTimeout("slow Naver response"),
+                httpx.Response(
+                    200,
+                    json={"totalCount": 1, "stocks": [_stock("005930")]},
+                ),
+            ]
+        )
+        _mock_market_page(mock, "KOSDAQ", 1, 1, [_stock("035720")])
+
+        job = await run_collector(collector.COLLECTOR_NAME, collector.collect)
+
+    assert kospi.call_count == 2
+    assert job["status"] == "completed"
+    assert job["result_count"] == 2
 
 
 @pytest.mark.asyncio
