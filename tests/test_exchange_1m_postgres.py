@@ -82,6 +82,31 @@ def test_paginated_fetch_retries_upbit_rate_limit(monkeypatch):
     assert sleeps == [0.5, 0.12]
 
 
+def test_upbit_windowed_pagination_advances_across_empty_periods():
+    class SparseExchange:
+        calls = []
+
+        def fetch_ohlcv(self, *_args, **kwargs):
+            self.calls.append(kwargs["since"])
+            if len(self.calls) == 1:
+                return []
+            return [[12_000_000, 1, 2, 0.5, 1.5, 3]]
+
+    exchange = SparseExchange()
+    rows = exchange_1m._fetch_1m_paginated(
+        exchange,
+        "SPARSE/KRW",
+        0,
+        limit=200,
+        max_pages=2,
+        until_ms=24_000_000,
+        windowed_since=True,
+    )
+
+    assert len(rows) == 1
+    assert exchange.calls == [0, 12_000_000]
+
+
 @pytest.mark.asyncio
 async def test_rotation_collects_only_bounded_batch_with_bulk_upsert(monkeypatch):
     class FakeExchange:

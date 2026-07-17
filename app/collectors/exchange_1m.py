@@ -146,6 +146,7 @@ def select_rotation_batch(
 def _fetch_1m_paginated(
     ex: Any, symbol: str, since_ms: int | None, *,
     limit: int, max_pages: int = 8, request_spacing_seconds: float = 0.0,
+    until_ms: int | None = None, windowed_since: bool = False,
 ) -> list[list]:
     out: list[list] = []
     seen: set[int] = set()
@@ -169,6 +170,11 @@ def _fetch_1m_paginated(
         if request_spacing_seconds > 0:
             time.sleep(request_spacing_seconds)
         if not page:
+            if windowed_since and cursor is not None and until_ms is not None:
+                next_cursor = cursor + limit * 60_000
+                if next_cursor < until_ms:
+                    cursor = next_cursor
+                    continue
             break
         new = [c for c in page if c[0] not in seen]
         if not new:
@@ -177,11 +183,17 @@ def _fetch_1m_paginated(
             seen.add(c[0])
             out.append(c)
         last_ts = new[-1][0]
-        next_cursor = last_ts + 60_000
+        next_cursor = (
+            cursor + limit * 60_000
+            if windowed_since and cursor is not None
+            else last_ts + 60_000
+        )
         if cursor is not None and next_cursor <= cursor:
             break
         cursor = next_cursor
-        if len(page) < limit:
+        if until_ms is not None and cursor >= until_ms:
+            break
+        if len(page) < limit and not windowed_since:
             break
     out.sort(key=lambda c: c[0])
     return out
@@ -231,6 +243,8 @@ async def collect_krw_1m(
                 limit=limit,
                 max_pages=max_pages,
                 request_spacing_seconds=_CCXT_REQUEST_SPACING_SECONDS[ex_name],
+                until_ms=now_ms,
+                windowed_since=ex_name == "upbit",
             )
             total_rows += _insert_candles(job_id, collector, sym, candles)
             latest_candle = (
