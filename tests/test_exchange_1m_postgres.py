@@ -54,6 +54,34 @@ def test_rotation_batch_prioritizes_missing_then_oldest(monkeypatch):
     assert selected == ["BTC/KRW", "XRP/KRW"]
 
 
+def test_paginated_fetch_retries_upbit_rate_limit(monkeypatch):
+    class RateLimitedExchange:
+        calls = 0
+
+        def fetch_ohlcv(self, *_args, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("429 Too Many Requests too_many_requests")
+            return [[1_752_729_600_000, 1, 2, 0.5, 1.5, 3]]
+
+    sleeps = []
+    exchange = RateLimitedExchange()
+    monkeypatch.setattr(exchange_1m.time, "sleep", sleeps.append)
+
+    rows = exchange_1m._fetch_1m_paginated(
+        exchange,
+        "BTC/KRW",
+        None,
+        limit=200,
+        max_pages=1,
+        request_spacing_seconds=0.12,
+    )
+
+    assert len(rows) == 1
+    assert exchange.calls == 2
+    assert sleeps == [0.5, 0.12]
+
+
 @pytest.mark.asyncio
 async def test_rotation_collects_only_bounded_batch_with_bulk_upsert(monkeypatch):
     class FakeExchange:

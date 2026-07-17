@@ -30,6 +30,7 @@ KST = timezone(timedelta(hours=9))
 
 # 거래소별 ccxt 1m fetch 한도 (동적 검증됨)
 _CCXT_1M_LIMITS = {"bithumb": 1000, "upbit": 200}
+_CCXT_REQUEST_SPACING_SECONDS = {"bithumb": 0.08, "upbit": 0.12}
 _KIS_CODE_RE = re.compile(r"^\d{6}$")
 
 _WIKI_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; tradingview-bot/1.0)"}
@@ -144,21 +145,29 @@ def select_rotation_batch(
 
 def _fetch_1m_paginated(
     ex: Any, symbol: str, since_ms: int | None, *,
-    limit: int, max_pages: int = 8,
+    limit: int, max_pages: int = 8, request_spacing_seconds: float = 0.0,
 ) -> list[list]:
     out: list[list] = []
     seen: set[int] = set()
     cursor = since_ms
     for _ in range(max_pages):
-        try:
-            page = (
-                ex.fetch_ohlcv(symbol, timeframe="1m", limit=limit)
-                if cursor is None
-                else ex.fetch_ohlcv(symbol, timeframe="1m", since=cursor, limit=limit)
-            )
-        except Exception as e:
-            print(f"[fetch_1m_paginated] {symbol}: {e}", flush=True)
-            break
+        page = None
+        for attempt in range(4):
+            try:
+                page = (
+                    ex.fetch_ohlcv(symbol, timeframe="1m", limit=limit)
+                    if cursor is None
+                    else ex.fetch_ohlcv(symbol, timeframe="1m", since=cursor, limit=limit)
+                )
+                break
+            except Exception as exc:
+                retryable = "429" in str(exc) or "too_many_requests" in str(exc).lower()
+                if not retryable or attempt >= 3:
+                    print(f"[fetch_1m_paginated] {symbol}: {exc}", flush=True)
+                    return out
+                time.sleep(max(request_spacing_seconds, 0.5 * (2 ** attempt)))
+        if request_spacing_seconds > 0:
+            time.sleep(request_spacing_seconds)
         if not page:
             break
         new = [c for c in page if c[0] not in seen]
@@ -215,7 +224,14 @@ async def collect_krw_1m(
             else:
                 since_ms = max(last_ms + 60_000, now_ms - lookback_minutes * 60_000)
             max_pages = max(1, (now_ms - since_ms) // 60_000 // limit + 1)
-            candles = _fetch_1m_paginated(ex, sym, since_ms, limit=limit, max_pages=max_pages)
+            candles = _fetch_1m_paginated(
+                ex,
+                sym,
+                since_ms,
+                limit=limit,
+                max_pages=max_pages,
+                request_spacing_seconds=_CCXT_REQUEST_SPACING_SECONDS[ex_name],
+            )
             total_rows += _insert_candles(job_id, collector, sym, candles)
             latest_candle = (
                 datetime.fromtimestamp(candles[-1][0] / 1000, tz=timezone.utc)
