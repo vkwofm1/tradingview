@@ -163,6 +163,14 @@ def _init_sqlite_db() -> None:
             active          INTEGER NOT NULL DEFAULT 1,
             updated_at      TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS collector_symbol_state (
+            collector       TEXT NOT NULL,
+            symbol          TEXT NOT NULL,
+            last_attempted_at TEXT NOT NULL,
+            last_succeeded_at TEXT,
+            last_candle_at  TEXT,
+            PRIMARY KEY (collector, symbol)
+        );
     """)
 
 
@@ -212,6 +220,17 @@ def _init_postgres_db() -> None:
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mc_symbol ON market_candles(symbol)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mc_collector ON market_candles(collector)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mc_time ON market_candles(candle_time)")
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS collector_symbol_state (
+            collector       VARCHAR(255) NOT NULL,
+            symbol          VARCHAR(255) NOT NULL,
+            last_attempted_at TIMESTAMPTZ NOT NULL,
+            last_succeeded_at TIMESTAMPTZ,
+            last_candle_at  TIMESTAMPTZ,
+            PRIMARY KEY (collector, symbol)
+        )
+    """)
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS collection_policies (
@@ -323,8 +342,55 @@ def insert_market_candle(
     payload: Any,
 ) -> None:
     now = datetime.now(timezone.utc).isoformat()
-
+    parsed_candle_time = _parse_timestamp(candle_time)
+    if parsed_candle_time is None:
+        raise ValueError(f"invalid candle_time: {candle_time!r}")
+    if parsed_candle_time.tzinfo is None:
+        if collector not in NAIVE_CANDLE_TIMEZONES:
+            raise ValueError(f"unknown timezone for naive candle collector: {collector!r}")
+        parsed_candle_time = parsed_candle_time.replace(
+            tzinfo=NAIVE_CANDLE_TIMEZONES[collector]
+        )
+    query = """
+        INSERT INTO market_candles
+            (job_id, collector, symbol, interval, candle_time, payload, collected_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(collector, symbol, interval, candle_time)
+        DO UPDATE SET job_id=excluded.job_id, payload=excluded.payload,
+                      collected_at=excluded.collected_at
+    """
+    values = (
+        job_id,
+        collector,
+        symbol,
+        interval,
+        (
+            parsed_candle_time.astimezone(timezone.utc)
+            if is_postgres()
+            else str(candle_time)
+        ),
+        json.dumps(payload),
+        now,
+    )
     if is_postgres():
+        _execute_postgres(query, values)
+    else:
+        _execute_sqlite(query, values)
+
+
+def insert_market_candles(
+    job_id: str,
+    collector: str,
+    symbol: str,
+    interval: str,
+    candles: list[tuple[str | datetime, Any]],
+) -> int:
+    """Bulk-upsert one symbol's candles in a single transaction."""
+    if not candles:
+        return 0
+    now = datetime.now(timezone.utc).isoformat()
+    values: list[tuple[Any, ...]] = []
+    for candle_time, payload in candles:
         parsed_candle_time = _parse_timestamp(candle_time)
         if parsed_candle_time is None:
             raise ValueError(f"invalid candle_time: {candle_time!r}")
@@ -335,25 +401,114 @@ def insert_market_candle(
                 tzinfo=NAIVE_CANDLE_TIMEZONES[collector]
             )
         canonical_candle_time = parsed_candle_time.astimezone(timezone.utc)
-        _execute_postgres(
-            """
+        values.append(
+            (
+                job_id,
+                collector,
+                symbol,
+                interval,
+                canonical_candle_time if is_postgres() else str(candle_time),
+                json.dumps(payload),
+                now,
+            )
+        )
+
+    if is_postgres():
+        connection = _get_postgres_conn()
+        with connection.cursor() as cursor:
+            cursor.executemany(
+                """
             INSERT INTO market_candles (job_id, collector, symbol, interval, candle_time, payload, collected_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT(collector, symbol, interval, candle_time)
             DO UPDATE SET job_id=excluded.job_id, payload=excluded.payload, collected_at=excluded.collected_at
             """,
-            (job_id, collector, symbol, interval, canonical_candle_time, json.dumps(payload), now),
-        )
+                values,
+            )
+        connection.commit()
     else:
-        _execute_sqlite(
+        connection = _get_sqlite_conn()
+        connection.executemany(
             """
             INSERT INTO market_candles (job_id, collector, symbol, interval, candle_time, payload, collected_at)
             VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(collector, symbol, interval, candle_time)
             DO UPDATE SET job_id=excluded.job_id, payload=excluded.payload, collected_at=excluded.collected_at
             """,
-            (job_id, collector, symbol, interval, candle_time, json.dumps(payload), now),
+            values,
         )
+        connection.commit()
+    return len(values)
+
+
+def latest_candle_times(collector: str, interval: str = "1m") -> dict[str, datetime | str]:
+    """Return the latest stored candle per symbol for bounded rotation ordering."""
+    query = """
+        SELECT symbol, MAX(candle_time) AS latest_candle_time
+        FROM market_candles
+        WHERE collector=? AND interval=?
+        GROUP BY symbol
+    """
+    if is_postgres():
+        rows = _execute_postgres(query, (collector, interval), fetch_all=True)
+    else:
+        rows = _execute_sqlite(query, (collector, interval), fetch_all=True)
+    return {
+        str(dict(row)["symbol"]).strip().upper(): dict(row)["latest_candle_time"]
+        for row in rows or []
+        if dict(row).get("symbol") and dict(row).get("latest_candle_time")
+    }
+
+
+def collection_symbol_attempt_times(collector: str) -> dict[str, datetime | str]:
+    """Return per-symbol rotation attempts so illiquid markets cannot starve peers."""
+    query = "SELECT symbol,last_attempted_at FROM collector_symbol_state WHERE collector=?"
+    if is_postgres():
+        rows = _execute_postgres(query, (collector,), fetch_all=True)
+    else:
+        rows = _execute_sqlite(query, (collector,), fetch_all=True)
+    return {
+        str(dict(row)["symbol"]).strip().upper(): dict(row)["last_attempted_at"]
+        for row in rows or []
+        if dict(row).get("symbol") and dict(row).get("last_attempted_at")
+    }
+
+
+def mark_collection_symbol_attempt(
+    collector: str,
+    symbol: str,
+    *,
+    latest_candle_at: str | datetime | None,
+    succeeded: bool,
+) -> None:
+    """Persist one rotation attempt independently of whether the market traded."""
+    now = datetime.now(timezone.utc).isoformat()
+    parsed_latest = _parse_timestamp(latest_candle_at)
+    if parsed_latest is not None and parsed_latest.tzinfo is None:
+        parsed_latest = parsed_latest.replace(tzinfo=KST)
+    latest = parsed_latest.astimezone(timezone.utc).isoformat() if parsed_latest else None
+    query = """
+        INSERT INTO collector_symbol_state(
+            collector,symbol,last_attempted_at,last_succeeded_at,last_candle_at
+        ) VALUES(?,?,?,?,?)
+        ON CONFLICT(collector,symbol) DO UPDATE SET
+            last_attempted_at=excluded.last_attempted_at,
+            last_succeeded_at=CASE
+                WHEN excluded.last_succeeded_at IS NOT NULL
+                THEN excluded.last_succeeded_at
+                ELSE collector_symbol_state.last_succeeded_at
+            END,
+            last_candle_at=CASE
+                WHEN excluded.last_candle_at IS NOT NULL
+                THEN excluded.last_candle_at
+                ELSE collector_symbol_state.last_candle_at
+            END
+    """
+    params = (collector, symbol, now, now if succeeded else None, latest)
+    if is_postgres():
+        _execute_postgres(query, params)
+    else:
+        _execute_sqlite(query, params)
 
 
 def _loads_list(value: str | None) -> list[str]:

@@ -75,20 +75,25 @@ def _last_ts_ms_from_db(collector: str, symbol: str, interval: str = "1m") -> in
         return None
 
 
-def _insert_candle(job_id: str, collector: str, symbol: str, candle: list) -> None:
-    payload = _candles_to_payload(candle)
-    ct = _candle_time_kst(payload["ts_ms"])
-    db.insert_market_candle(job_id, collector, symbol, "1m", ct, payload)
+def _insert_candles(job_id: str, collector: str, symbol: str, candles: list[list]) -> int:
+    values = []
+    for candle in candles:
+        payload = _candles_to_payload(candle)
+        values.append((_candle_time_kst(payload["ts_ms"]), payload))
+    return db.insert_market_candles(job_id, collector, symbol, "1m", values)
 
 
 # ───────────────────────────────────────────────────────────
 # 빗썸/업비트 KRW 전체 1m
 # ───────────────────────────────────────────────────────────
 
-def get_krw_market_symbols(exchange_name: str) -> list[str]:
+def get_krw_market_symbols(exchange_name: str, exchange: Any | None = None) -> list[str]:
     """ccxt로 빗썸/업비트 KRW active spot 페어 목록."""
-    import ccxt
-    ex = getattr(ccxt, exchange_name)({"enableRateLimit": True})
+    if exchange is None:
+        import ccxt
+
+        exchange = getattr(ccxt, exchange_name)({"enableRateLimit": True})
+    ex = exchange
     try:
         markets = ex.load_markets()
     except Exception as e:
@@ -100,6 +105,41 @@ def get_krw_market_symbols(exchange_name: str) -> list[str]:
         and m.get("active", True)
         and (m.get("type") or "spot") == "spot"
     )
+
+
+def _timestamp_sort_value(value: Any) -> float:
+    if value is None:
+        return float("-inf")
+    try:
+        parsed = value if isinstance(value, datetime) else datetime.fromisoformat(
+            str(value).replace("Z", "+00:00")
+        )
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=KST)
+        return parsed.timestamp()
+    except (TypeError, ValueError):
+        return float("-inf")
+
+
+def select_rotation_batch(
+    collector: str,
+    symbols: list[str],
+    batch_size: int | None,
+) -> list[str]:
+    """Select missing/oldest symbols first without truncating the universe."""
+    unique = sorted(dict.fromkeys(str(symbol).strip().upper() for symbol in symbols if symbol))
+    if batch_size is None or batch_size <= 0 or batch_size >= len(unique):
+        return unique
+    attempts = db.collection_symbol_attempt_times(collector)
+    latest = {} if attempts else db.latest_candle_times(collector, "1m")
+    return sorted(
+        unique,
+        key=lambda symbol: (
+            _timestamp_sort_value(attempts.get(symbol)),
+            _timestamp_sort_value(latest.get(symbol)),
+            symbol,
+        ),
+    )[:batch_size]
 
 
 def _fetch_1m_paginated(
@@ -140,22 +180,34 @@ def _fetch_1m_paginated(
 
 async def collect_krw_1m(
     job_id: str, exchanges: list[str] | None = None,
-    *, lookback_minutes: int = 1440, ex_objs: dict | None = None,
+    *, lookback_minutes: int = 4320, batch_size: int | None = None,
+    ex_objs: dict | None = None,
 ) -> int:
     """빗썸/업비트 KRW 전체 1m. 사용 사례:
     매일 1회 cron + 즉시 수집 wrapper.
     """
-    import ccxt
     exchanges = exchanges or ["bithumb", "upbit"]
     total_rows = 0
     for ex_name in exchanges:
         if ex_name not in _CCXT_1M_LIMITS:
             continue
-        ex = (ex_objs or {}).get(ex_name) or getattr(ccxt, ex_name)({"enableRateLimit": True})
-        symbols = get_krw_market_symbols(ex_name)
+        ex = (ex_objs or {}).get(ex_name)
+        if ex is None:
+            import ccxt
+
+            ex = getattr(ccxt, ex_name)({"enableRateLimit": True})
+        symbols = get_krw_market_symbols(ex_name, ex)
+        if not symbols:
+            raise RuntimeError(f"{ex_name} active KRW spot universe is empty")
         collector = f"{ex_name}_1m"
+        selected = select_rotation_batch(collector, symbols, batch_size)
+        print(
+            f"[collect_krw_1m] exchange={ex_name} universe={len(symbols)} "
+            f"batch={len(selected)} collector={collector}",
+            flush=True,
+        )
         limit = _CCXT_1M_LIMITS[ex_name]
-        for sym in symbols:
+        for sym in selected:
             last_ms = _last_ts_ms_from_db(collector, sym)
             now_ms = int(time.time() * 1000)
             if last_ms is None:
@@ -164,9 +216,18 @@ async def collect_krw_1m(
                 since_ms = max(last_ms + 60_000, now_ms - lookback_minutes * 60_000)
             max_pages = max(1, (now_ms - since_ms) // 60_000 // limit + 1)
             candles = _fetch_1m_paginated(ex, sym, since_ms, limit=limit, max_pages=max_pages)
-            for c in candles:
-                _insert_candle(job_id, collector, sym, c)
-                total_rows += 1
+            total_rows += _insert_candles(job_id, collector, sym, candles)
+            latest_candle = (
+                datetime.fromtimestamp(candles[-1][0] / 1000, tz=timezone.utc)
+                if candles
+                else None
+            )
+            db.mark_collection_symbol_attempt(
+                collector,
+                sym,
+                latest_candle_at=latest_candle,
+                succeeded=bool(candles),
+            )
     return total_rows
 
 
@@ -197,9 +258,7 @@ async def collect_krw_1m_until_now(
         limit = _CCXT_1M_LIMITS[ex_name]
         max_pages = max(1, int(max_minutes // limit) + 1)
         candles = _fetch_1m_paginated(ex, sym, since_ms, limit=limit, max_pages=max_pages)
-        for c in candles:
-            _insert_candle(job_id, collector, sym, c)
-            total_rows += 1
+        total_rows += _insert_candles(job_id, collector, sym, candles)
     return total_rows
 
 

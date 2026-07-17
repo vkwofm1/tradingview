@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from app import db
-from app.collectors import bithumb, crypto, naver_stocks, stocks, upbit
+from app.collectors import bithumb, crypto, exchange_1m, naver_stocks, stocks, upbit
 from app.runner import run_collector
 
 
@@ -40,14 +40,34 @@ def _print(payload: object) -> None:
 
 
 async def cmd_krw_1m(args):
-    del args
     db.init_db()
     jobs = []
-    jobs.append(await run_collector("bithumb", bithumb.collect, None))
-    jobs.append(await run_collector("upbit", upbit.collect, None))
+    async def collect_full(job_id, _symbols):
+        return await exchange_1m.collect_krw_1m(
+            job_id,
+            lookback_minutes=args.lookback_minutes,
+        )
+
+    jobs.append(await run_collector("krw_1m_full", collect_full, None))
     jobs.append(await run_collector("crypto", crypto.collect, None))
     _print(jobs)
     return 1 if any((job or {}).get("status") == "failed" for job in jobs) else 0
+
+
+async def cmd_krw_1m_rotate(args):
+    db.init_db()
+
+    async def collect_rotation(job_id, _symbols):
+        return await exchange_1m.collect_krw_1m(
+            job_id,
+            exchanges=[args.exchange],
+            lookback_minutes=args.lookback_minutes,
+            batch_size=args.batch_size,
+        )
+
+    job = await run_collector(f"{args.exchange}_1m_rotation", collect_rotation, None)
+    _print(job)
+    return 0 if (job or {}).get("status") != "failed" else 1
 
 
 async def cmd_us_stocks_1m(args):
@@ -92,7 +112,7 @@ def main() -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p1 = sub.add_parser("krw-1m", help="빗썸+업비트+crypto 현재 수집")
-    p1.add_argument("--lookback-minutes", type=int, default=1440)
+    p1.add_argument("--lookback-minutes", type=int, default=4320)
     p1.set_defaults(fn=cmd_krw_1m)
 
     p2 = sub.add_parser("us-stocks-1m", help="미장 TradingView stocks 수집")
@@ -111,6 +131,12 @@ def main() -> int:
     p5.add_argument("--market", choices=["kr", "us"], required=True)
     p5.add_argument("--symbols", required=True)
     p5.set_defaults(fn=cmd_stocks_1m_single)
+
+    p6 = sub.add_parser("krw-1m-rotate", help="거래소별 전체 KRW 현물을 최장 경과 순으로 순환 수집")
+    p6.add_argument("--exchange", choices=("upbit", "bithumb"), required=True)
+    p6.add_argument("--batch-size", type=int, default=30)
+    p6.add_argument("--lookback-minutes", type=int, default=4320)
+    p6.set_defaults(fn=cmd_krw_1m_rotate)
 
     args = parser.parse_args()
     return asyncio.run(args.fn(args))
