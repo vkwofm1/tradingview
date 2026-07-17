@@ -101,6 +101,7 @@ async def test_collects_both_markets_with_bounded_pagination_filters_and_ranks(
         ),
         _stock("12345", price="5,000", volume="900"),
         _stock("123456", price="10,001", volume="800"),
+        _stock("000145", price="5,000", volume="1,000", name="preferred-share"),
     ]
 
     with respx.mock(assert_all_called=True) as mock:
@@ -112,7 +113,7 @@ async def test_collects_both_markets_with_bounded_pagination_filters_and_ranks(
             101,
             [_stock("000660", price="9,000", volume="200", name="page-two")],
         )
-        _mock_market_page(mock, "KOSDAQ", 1, 4, kosdaq_rows)
+        _mock_market_page(mock, "KOSDAQ", 1, 5, kosdaq_rows)
 
         job = await run_collector(collector.COLLECTOR_NAME, collector.collect)
 
@@ -129,6 +130,7 @@ async def test_collects_both_markets_with_bounded_pagination_filters_and_ranks(
     assert by_code["035420"]["volume_rank"] == 3
     assert by_code["005930"]["volume_rank"] == 4
     assert by_code["035420"]["current_price"] == 7000.0
+    assert "000145" not in by_code
     assert by_code["000660"]["market"] == "KOSPI"
     assert by_code["000660"]["as_of"] == "2026-07-14T15:30:00+09:00"
     assert by_code["000660"]["market_status"] == "CLOSE"

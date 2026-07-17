@@ -410,6 +410,10 @@ def _prepare_item(raw: _RawItem) -> tuple[dict[str, object] | None, str | None]:
     code = _required_text(item, "itemCode")
     if code is None or _CODE_RE.fullmatch(code) is None:
         return None, "invalid_itemCode"
+    # KRX 보통주 본주는 0으로 끝나는 6자리 단축코드만 허용한다. 우선주 등은
+    # Naver의 stockEndType이 stock이어도 canary universe에 섞지 않는다.
+    if not code.endswith("0"):
+        return None, "not_common_stock_code"
 
     stock_end_type = _required_text(item, "stockEndType")
     if stock_end_type is None or stock_end_type.lower() != "stock":
