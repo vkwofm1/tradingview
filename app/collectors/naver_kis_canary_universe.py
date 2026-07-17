@@ -424,7 +424,10 @@ def _prepare_item(raw: _RawItem) -> tuple[dict[str, object] | None, str | None]:
     if price is None:
         price_field = "currentPrice"
         price = _finite_number(item.get(price_field))
-    if price is None or not 0 < price <= 10_000:
+    # 원본 universe는 주문금액과 분리해 모든 유효 보통주를 보존한다.
+    # 실제 진입 가능 가격 상한은 KIS 실행기가 런타임 주문금액 설정으로
+    # 적용하므로, 금액 변경 때 수집기를 다시 배포할 필요가 없다.
+    if price is None or price <= 0:
         return None, "invalid_current_price"
 
     volume = _finite_number(item.get("accumulatedTradingVolumeRaw"))
@@ -544,7 +547,7 @@ def _prepare_universe(raw_rows: list[_RawItem], top_n: int) -> list[dict[str, ob
         )
         raise NaverKisCanaryUniverseValidationError(
             "no eligible six-digit common stocks with finite "
-            f"0<current_price<=10000 and volume>0 ({reason_summary or 'no rows'})"
+            f"current_price>0 and volume>0 ({reason_summary or 'no rows'})"
         )
 
     eligible = list(eligible_by_code.values())
@@ -560,7 +563,7 @@ def _prepare_universe(raw_rows: list[_RawItem], top_n: int) -> list[dict[str, ob
     for payload in eligible:
         price = _finite_number(payload.get("current_price"))
         volume = _finite_number(payload.get("volume"))
-        if price is None or not 0 < price <= 10_000 or volume is None or volume <= 0:
+        if price is None or price <= 0 or volume is None or volume <= 0:
             raise NaverKisCanaryUniverseValidationError(
                 "prepared universe violated the current_price/volume contract"
             )

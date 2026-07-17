@@ -100,7 +100,7 @@ async def test_collects_both_markets_with_bounded_pagination_filters_and_ranks(
             use_current_price=True,
         ),
         _stock("12345", price="5,000", volume="900"),
-        _stock("123456", price="10,001", volume="800"),
+        _stock("123450", price="10,001", volume="800"),
         _stock("000145", price="5,000", volume="1,000", name="preferred-share"),
     ]
 
@@ -121,14 +121,16 @@ async def test_collects_both_markets_with_bounded_pagination_filters_and_ranks(
         assert all("/api/stock/" not in str(call.request.url) for call in mock.calls)
 
     assert job["status"] == "completed"
-    assert job["result_count"] == 4
+    assert job["result_count"] == 5
     rows = db.query_market_data(collector.COLLECTOR_NAME, limit=20)
     by_code = {row["symbol"]: row["payload"] for row in rows}
-    assert set(by_code) == {"035720", "000660", "035420", "005930"}
-    assert by_code["035720"]["volume_rank"] == 1
-    assert by_code["000660"]["volume_rank"] == 2
-    assert by_code["035420"]["volume_rank"] == 3
-    assert by_code["005930"]["volume_rank"] == 4
+    assert set(by_code) == {"123450", "035720", "000660", "035420", "005930"}
+    assert by_code["123450"]["volume_rank"] == 1
+    assert by_code["035720"]["volume_rank"] == 2
+    assert by_code["000660"]["volume_rank"] == 3
+    assert by_code["035420"]["volume_rank"] == 4
+    assert by_code["005930"]["volume_rank"] == 5
+    assert by_code["123450"]["current_price"] == 10001.0
     assert by_code["035420"]["current_price"] == 7000.0
     assert "000145" not in by_code
     assert by_code["000660"]["market"] == "KOSPI"
