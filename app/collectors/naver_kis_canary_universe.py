@@ -24,8 +24,12 @@ MARKETS = ("KOSPI", "KOSDAQ")
 MARKET_VALUE_URL = "https://m.stock.naver.com/api/stocks/marketValue/{market}"
 PAGE_SIZE = 100
 MAX_PAGES_PER_MARKET = 50
-DEFAULT_TOP_N = 200
-MAX_TOP_N = 500
+# KOSPI/KOSDAQ 각 50페이지 x 100행이 수집 상한이다. TOP_N 환경값은
+# 부분 universe를 만드는 선택 개수가 아니라 전체 수집의 안전 상한으로만 쓴다.
+# 따라서 운영 기본값은 페이지네이션 최대치와 같고, 적격 종목이 이 값을 넘으면
+# 조용히 잘라내지 않고 fail-closed 한다.
+DEFAULT_TOP_N = len(MARKETS) * PAGE_SIZE * MAX_PAGES_PER_MARKET
+MAX_TOP_N = DEFAULT_TOP_N
 
 HEADERS = {
     "User-Agent": (
@@ -541,18 +545,22 @@ def _prepare_universe(raw_rows: list[_RawItem], top_n: int) -> list[dict[str, ob
 
     eligible = list(eligible_by_code.values())
     eligible.sort(key=lambda row: (-float(row["volume"]), str(row["code"])))
-    selected = eligible[:top_n]
-    for rank, payload in enumerate(selected, start=1):
+    if len(eligible) > top_n:
+        raise NaverKisCanaryUniverseBoundsError(
+            "eligible universe exceeds configured safety bound; "
+            f"eligible={len(eligible)}, bound={top_n}"
+        )
+    for rank, payload in enumerate(eligible, start=1):
         payload["volume_rank"] = rank
 
-    for payload in selected:
+    for payload in eligible:
         price = _finite_number(payload.get("current_price"))
         volume = _finite_number(payload.get("volume"))
         if price is None or not 0 < price <= 10_000 or volume is None or volume <= 0:
             raise NaverKisCanaryUniverseValidationError(
                 "prepared universe violated the current_price/volume contract"
             )
-    return selected
+    return eligible
 
 
 async def collect(job_id: str, symbols: list[str] | None = None) -> int:

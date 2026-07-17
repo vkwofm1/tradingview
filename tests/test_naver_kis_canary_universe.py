@@ -83,7 +83,7 @@ def _mock_market_page(
 async def test_collects_both_markets_with_bounded_pagination_filters_and_ranks(
     monkeypatch,
 ):
-    monkeypatch.setenv("NAVER_KIS_CANARY_UNIVERSE_TOP_N", "3")
+    monkeypatch.setenv("NAVER_KIS_CANARY_UNIVERSE_TOP_N", "10")
     kospi_first_page = [
         _stock("005930", price="9,900", volume="100", name="eligible-low-price")
     ]
@@ -120,13 +120,14 @@ async def test_collects_both_markets_with_bounded_pagination_filters_and_ranks(
         assert all("/api/stock/" not in str(call.request.url) for call in mock.calls)
 
     assert job["status"] == "completed"
-    assert job["result_count"] == 3
+    assert job["result_count"] == 4
     rows = db.query_market_data(collector.COLLECTOR_NAME, limit=20)
     by_code = {row["symbol"]: row["payload"] for row in rows}
-    assert set(by_code) == {"035720", "000660", "035420"}
+    assert set(by_code) == {"035720", "000660", "035420", "005930"}
     assert by_code["035720"]["volume_rank"] == 1
     assert by_code["000660"]["volume_rank"] == 2
     assert by_code["035420"]["volume_rank"] == 3
+    assert by_code["005930"]["volume_rank"] == 4
     assert by_code["035420"]["current_price"] == 7000.0
     assert by_code["000660"]["market"] == "KOSPI"
     assert by_code["000660"]["as_of"] == "2026-07-14T15:30:00+09:00"
@@ -402,7 +403,7 @@ def test_request_spacing_environment_is_bounded(monkeypatch, raw_value, expected
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("top_n", ["0", "501", "not-an-integer"])
+@pytest.mark.parametrize("top_n", ["0", "10001", "not-an-integer"])
 async def test_top_n_configuration_fails_closed_before_http(monkeypatch, top_n):
     monkeypatch.setenv("NAVER_KIS_CANARY_UNIVERSE_TOP_N", top_n)
 
@@ -412,6 +413,21 @@ async def test_top_n_configuration_fails_closed_before_http(monkeypatch, top_n):
     assert job["status"] == "failed"
     assert job["result_count"] == 0
     assert "NAVER_KIS_CANARY_UNIVERSE_TOP_N" in job["error"]
+
+
+@pytest.mark.asyncio
+async def test_configured_bound_never_silently_truncates_full_universe(monkeypatch):
+    monkeypatch.setenv("NAVER_KIS_CANARY_UNIVERSE_TOP_N", "1")
+    with respx.mock(assert_all_called=True) as mock:
+        _mock_market_page(mock, "KOSPI", 1, 1, [_stock("005930")])
+        _mock_market_page(mock, "KOSDAQ", 1, 1, [_stock("035720")])
+
+        job = await run_collector(collector.COLLECTOR_NAME, collector.collect)
+
+    assert job["status"] == "failed"
+    assert job["result_count"] == 0
+    assert "eligible=2, bound=1" in job["error"]
+    assert db.query_market_data(collector.COLLECTOR_NAME, limit=10) == []
 
 
 @pytest.mark.asyncio
