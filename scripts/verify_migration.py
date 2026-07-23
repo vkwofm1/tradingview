@@ -217,6 +217,7 @@ def verify_migration(sqlite_path: str, pg_url: str) -> bool:
             "idx_mc_symbol",
             "idx_mc_collector",
             "idx_mc_time",
+            "idx_mc_job_collector_interval",
         ]
 
         print(f"Found {len(indexes)} indexes:")

@@ -151,6 +151,8 @@ def _init_sqlite_db() -> None:
         CREATE INDEX IF NOT EXISTS idx_mc_symbol ON market_candles(symbol);
         CREATE INDEX IF NOT EXISTS idx_mc_collector ON market_candles(collector);
         CREATE INDEX IF NOT EXISTS idx_mc_time ON market_candles(candle_time);
+        CREATE INDEX IF NOT EXISTS idx_mc_job_collector_interval
+            ON market_candles(job_id, collector, interval);
         CREATE TABLE IF NOT EXISTS collection_policies (
             collector       TEXT PRIMARY KEY,
             include_symbols TEXT NOT NULL DEFAULT '[]',
@@ -220,6 +222,10 @@ def _init_postgres_db() -> None:
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mc_symbol ON market_candles(symbol)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mc_collector ON market_candles(collector)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mc_time ON market_candles(candle_time)")
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_mc_job_collector_interval "
+        "ON market_candles(job_id, collector, interval)"
+    )
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS collector_symbol_state (
