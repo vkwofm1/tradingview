@@ -148,6 +148,8 @@ def _init_sqlite_db() -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_md_symbol ON market_data(symbol);
         CREATE INDEX IF NOT EXISTS idx_md_collector ON market_data(collector);
+        CREATE INDEX IF NOT EXISTS idx_md_collector_job_id
+            ON market_data(collector, job_id);
         CREATE INDEX IF NOT EXISTS idx_mc_symbol ON market_candles(symbol);
         CREATE INDEX IF NOT EXISTS idx_mc_collector ON market_candles(collector);
         CREATE INDEX IF NOT EXISTS idx_mc_time ON market_candles(candle_time);
@@ -219,6 +221,10 @@ def _init_postgres_db() -> None:
 
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_md_symbol ON market_data(symbol)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_md_collector ON market_data(collector)")
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_md_collector_job_id "
+        "ON market_data(collector, job_id)"
+    )
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mc_symbol ON market_candles(symbol)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mc_collector ON market_candles(collector)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mc_time ON market_candles(candle_time)")
