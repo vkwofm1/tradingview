@@ -60,6 +60,10 @@ def test_postgres_schema_uses_timezone_aware_timestamps(monkeypatch):
     assert "market_candles(job_id, collector, interval)" in schema
     assert "idx_md_collector_job_id" in schema
     assert "market_data(collector, job_id)" in schema
+    assert "idx_md_collector_symbol_time" in schema
+    assert "market_data(collector, symbol, collected_at)" in schema
+    assert "idx_mc_collector_symbol_time" in schema
+    assert "market_candles(collector, symbol, candle_time)" in schema
     assert connection.commits == 1
 
 
