@@ -15,9 +15,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from app import db
-from app.collectors import bithumb, crypto, exchange_1m, naver_stocks, stocks, upbit
-from app.runner import run_collector
+from app import db  # noqa: E402 — standalone CLI path bootstrap above
+from app.collectors import bithumb, crypto, exchange_1m, naver_stocks, stocks, upbit  # noqa: E402
+from app.runner import run_collector  # noqa: E402
 
 
 def _json_default(value: object) -> str:
@@ -71,11 +71,16 @@ async def cmd_krw_1m_rotate(args):
 
 
 async def cmd_us_stocks_1m(args):
-    del args
     db.init_db()
-    job = await run_collector("stocks", stocks.collect, None)
-    _print(job)
-    return 0 if (job or {}).get("status") != "failed" else 1
+    explicit = getattr(args, "symbols", None)
+    requested = [s.strip() for s in explicit.split(",") if s.strip()] if explicit else None
+    symbols = db.resolve_collection_symbols("stocks", requested)
+    symbols = stocks.configured_symbols() if symbols is None else symbols
+    batch_size = max(1, int(getattr(args, "batch_size", 50)))
+    jobs = [await run_collector("stocks", stocks.collect, symbols[start:start + batch_size])
+            for start in range(0, len(symbols), batch_size)]
+    _print(jobs[0] if len(jobs) == 1 else jobs)
+    return 1 if any(job.get("status") == "failed" for job in jobs) else 0
 
 
 async def cmd_kr_stocks_1m(args):
@@ -115,8 +120,9 @@ def main() -> int:
     p1.add_argument("--lookback-minutes", type=int, default=4320)
     p1.set_defaults(fn=cmd_krw_1m)
 
-    p2 = sub.add_parser("us-stocks-1m", help="미장 TradingView stocks 수집")
+    p2 = sub.add_parser("us-stocks", aliases=["us-stocks-1m"], help="미장 현재가·완료 일봉/60분봉·재무 근거 수집")
     p2.add_argument("--batch-size", type=int, default=50)
+    p2.add_argument("--symbols", help="쉼표로 구분한 후보 티커. 생략 시 수집 정책 또는 기본 목록")
     p2.set_defaults(fn=cmd_us_stocks_1m)
 
     p3 = sub.add_parser("kr-stocks-1m", help="국장 TradingView naver_stocks 수집")

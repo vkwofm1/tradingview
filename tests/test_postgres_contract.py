@@ -21,6 +21,10 @@ class _Cursor:
     def fetchone(self):
         return {"ok": True}
 
+    def executemany(self, sql, rows):
+        for row in rows:
+            self.execute(sql, row)
+
     def fetchall(self):
         return [{"ok": True}]
 
@@ -65,6 +69,32 @@ def test_postgres_schema_uses_timezone_aware_timestamps(monkeypatch):
     assert "idx_mc_collector_symbol_time" in schema
     assert "market_candles(collector, symbol, candle_time)" in schema
     assert connection.commits == 1
+
+
+def test_stock_snapshot_publishes_candles_data_and_completion_in_one_commit(monkeypatch):
+    connection = _Connection()
+    monkeypatch.setattr(db, "DB_TYPE", "postgres")
+    monkeypatch.setattr(db, "_get_postgres_conn", lambda: connection)
+    count = db.publish_stock_snapshots("job", [{"symbol": "AAPL", "frames": {"1d": [{"start_at": "2026-09-10T13:30:00+00:00"}]}, "payload": {"symbol": "AAPL"}}])
+    assert count == 1
+    assert connection.commits == 1
+    assert len(connection.statements) == 3
+    assert all("?" not in sql for sql, _ in connection.statements)
+    assert "UPDATE jobs" in connection.statements[-1][0]
+
+
+def test_stock_postgres_publish_rolls_back_on_error(monkeypatch):
+    connection = _Connection(fail=True)
+    monkeypatch.setattr(db, "DB_TYPE", "postgres")
+    monkeypatch.setattr(db, "_get_postgres_conn", lambda: connection)
+    try:
+        db.publish_stock_snapshots("job", [{"symbol": "AAPL", "frames": {}, "payload": {}}])
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("write failure must propagate")
+    assert connection.rollbacks == 1
+    assert connection.commits == 0
 
 
 def test_postgres_execute_rolls_back_failed_transaction(monkeypatch):

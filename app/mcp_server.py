@@ -70,8 +70,17 @@ def build_mcp() -> FastMCP:
 
     @mcp.tool()
     async def collect_us_stocks(symbols: list[str] | None = None) -> Any:
-        """Collect US stocks from Yahoo Finance."""
+        """Collect US prices, completed 1d/60m OHLCV, dated financials and conditional 3R plans.
+
+        Omitted symbols use the stocks collection policy or configured defaults.
+        Fetch the resulting evidence with query_us_stock_evidence; no orders are placed.
+        """
         return await run_collector("stocks", stocks.collect, symbols)
+
+    @mcp.tool()
+    def query_us_stock_evidence(symbols: list[str] | None = None) -> ListResponse:
+        """Read US candidate evidence with live freshness and broker-cost verification flags."""
+        return ListResponse(result=stocks.query_evidence(symbols))
 
     @mcp.tool()
     async def collect_global_crypto(ids: list[str] | None = None) -> Any:

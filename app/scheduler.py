@@ -41,7 +41,7 @@ def _interval_for(name: str) -> int:
         except ValueError:
             log.warning("Invalid SCHED_INTERVAL_SEC=%r", global_override)
 
-    return DEFAULT_INTERVAL_SEC
+    return 900 if name == "stocks" else DEFAULT_INTERVAL_SEC
 
 
 class Scheduler:

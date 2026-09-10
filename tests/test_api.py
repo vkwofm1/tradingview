@@ -787,6 +787,7 @@ async def test_mcp_tools_listed_and_query():
             "collect_upbit",
             "collect_bithumb",
             "collect_us_stocks",
+            "query_us_stock_evidence",
             "collect_global_crypto",
             "query_market_data",
             "upsert_collection_policy",

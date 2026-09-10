@@ -188,6 +188,13 @@ def list_jobs(limit: int = Query(20, ge=1, le=100)):
     return db.list_jobs(limit)
 
 
+@app.get("/stocks/evidence")
+def us_stock_evidence(symbols: str | None = Query(None, max_length=1000)):
+    """조회 시점에 신선도를 다시 검증하는 미국 주식 근거 패킷. 주문 권한 없음."""
+    selected = [s.strip() for s in symbols.split(",") if s.strip()] if symbols is not None else None
+    return stocks.query_evidence(selected)
+
+
 @app.get("/collection-policies")
 def list_collection_policies():
     return db.list_collection_policies()
