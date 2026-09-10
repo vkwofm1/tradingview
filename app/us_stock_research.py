@@ -69,6 +69,17 @@ def financial_metrics(info, income, balance, cashflow, *, now):
         value(income, "TaxProvision"),
         value(income, "PretaxIncome"),
     )
+    tax_rate, tax_rate_source = None, None
+    provider_tax_rate = value(income, "TaxRateForCalcs")
+    if pretax is not None and pretax > 0:
+        if tax is not None:
+            tax_rate = tax / pretax
+            tax_rate_source = "income_statement.TaxProvision/PretaxIncome"
+        elif provider_tax_rate is not None:
+            # 일부 제공사 응답은 세액 없이 동일 결산연도 계산용 세율만 준다.
+            # 세액을 역산해 원자료로 가장하거나 전년도 세율을 섞지 않는다.
+            tax_rate = provider_tax_rate
+            tax_rate_source = "income_statement.TaxRateForCalcs"
     result["inputs"] = {
         "operating_cash_flow": ocf,
         "capex": capex,
@@ -78,6 +89,9 @@ def financial_metrics(info, income, balance, cashflow, *, now):
         "operating_income": operating,
         "tax_provision": tax,
         "pretax_income": pretax,
+        "effective_tax_rate": tax_rate,
+        "tax_rate_source": tax_rate_source,
+        "provider_tax_rate_for_calcs": provider_tax_rate,
     }
     if ocf is not None and capex is not None:
         result["fcf"] = ocf - abs(capex)
@@ -114,16 +128,14 @@ def financial_metrics(info, income, balance, cashflow, *, now):
             if (
                 capital > 0
                 and operating is not None
-                and tax is not None
-                and pretax is not None
-                and pretax > 0
-                and 0 <= tax / pretax <= 1
+                and tax_rate is not None
+                and 0 <= tax_rate <= 1
             ):
-                result["roic_pct"] = operating * (1 - tax / pretax) / capital * 100
+                result["roic_pct"] = operating * (1 - tax_rate) / capital * 100
     result["formulas"] = {
         "fcf": "operating_cash_flow - abs(capex)",
         "net_debt": "total_debt - cash_and_short_term_investments",
-        "roic_pct": "100 * operating_income * (1-tax_provision/pretax_income) / average(current,prior)(debt+equity-cash)",
+        "roic_pct": "100 * operating_income * (1-effective_tax_rate) / average(current,prior)(debt+equity-cash); tax_rate_source identifies reported-tax ratio or same-period provider calculation rate",
     }
     return result
 

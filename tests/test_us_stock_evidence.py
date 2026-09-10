@@ -164,6 +164,32 @@ def test_financial_periods_and_explicit_formulas():
     assert financial_metrics(*args, now=NOW)["fcf"] is None
 
 
+@pytest.mark.parametrize("tax_rate", [0.196144, None, float("nan"), -0.1, 1.1])
+def test_missing_tax_provision_uses_only_valid_same_period_provider_rate(tax_rate):
+    args = financials()
+    income = args[1]
+    income.drop(index="TaxProvision", inplace=True)
+    income.loc["TaxRateForCalcs"] = [tax_rate, 0.5]
+    metrics = financial_metrics(*args, now=NOW)
+    assert metrics["inputs"]["tax_provision"] is None
+    if tax_rate == 0.196144:
+        assert metrics["roic_pct"] == pytest.approx(100 * (1 - tax_rate) / 260 * 100)
+        assert metrics["inputs"]["tax_rate_source"] == "income_statement.TaxRateForCalcs"
+    else:
+        assert metrics["roic_pct"] is None
+
+
+def test_reported_tax_takes_precedence_and_invalid_ratio_is_not_masked():
+    args = financials()
+    income = args[1]
+    income.loc["TaxRateForCalcs"] = [0.5, 0.5]
+    metrics = financial_metrics(*args, now=NOW)
+    assert metrics["roic_pct"] == pytest.approx(80 / 260 * 100)
+    assert metrics["inputs"]["effective_tax_rate"] == 0.2
+    income.loc["TaxProvision"] = [-20, 20]
+    assert financial_metrics(*args, now=NOW)["roic_pct"] is None
+
+
 def test_conditional_entry_solves_net_3r_without_inflating_target(monkeypatch):
     monkeypatch.delenv("US_STOCK_COST_CONFIRMED", raising=False)
     daily = completed_candles(chart("1d"), "1d", NOW)
