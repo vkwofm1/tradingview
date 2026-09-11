@@ -1,0 +1,15 @@
+[Unit]
+Description=Capacity-triggered verified TradingView archive to D (bounded cleanup)
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/vkwofm/tradingview-pg
+Environment=PATH=/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 /home/vkwofm/tradingview-pg/scripts/pressure_archive.py --run
+TimeoutStartSec=45min
+UMask=0077
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7

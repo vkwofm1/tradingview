@@ -1,0 +1,11 @@
+[Unit]
+Description=Check WSL headroom every ten minutes; archive only under pressure
+
+[Timer]
+OnBootSec=5min
+OnUnitInactiveSec=10min
+RandomizedDelaySec=30s
+Unit=tradingview-pressure-archive.service
+
+[Install]
+WantedBy=timers.target
