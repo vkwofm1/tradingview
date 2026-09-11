@@ -49,6 +49,12 @@ Windows에 실행기를 두므로 WSL 종료 후에도 작업을 이어갈 수 �
 실행 상태는 같은 폴더의 `resize-status.json`, 상세 출력은 `resize-transcript.log`에 남긴다.
 `complete`가 아닌 상태를 증설·서비스 검증 완료로 취급하지 않는다.
 
+WSL에서 시작할 때는 `scripts/launch_wsl_expansion.ps1`도 같은 폴더에 설치하고
+Windows PowerShell로 이 런처를 실행한다. Windows의 별도 프로세스에서 UAC를 요청해
+호출한 WSL 세션 종료와 분리하고, 한글 프로필 경로는 인코딩된 명령으로 전달한다.
+`launch-status.json`은 승인·프로세스 실행 상태이고 실제 증설 결과는 아니다.
+실행기 진입 전 오류는 `bootstrap-error.log`에 기록한다.
+
 ## 인증과 접근
 
 현재 Windows 계정 `유한승@SERVER`만 SSPI로 인증한다. 비밀번호나 `trust` 인증은
