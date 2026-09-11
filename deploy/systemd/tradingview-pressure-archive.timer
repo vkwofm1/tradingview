@@ -1,9 +1,9 @@
 [Unit]
-Description=Check WSL headroom every ten minutes; archive only under pressure
+Description=Check WSL headroom daily; archive only under pressure
 
 [Timer]
-OnBootSec=5min
-OnUnitInactiveSec=10min
+OnCalendar=*-*-* 07:00:00 Asia/Seoul
+Persistent=true
 RandomizedDelaySec=30s
 Unit=tradingview-pressure-archive.service
 
