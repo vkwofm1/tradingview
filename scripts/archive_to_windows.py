@@ -144,6 +144,7 @@ def stream_dump(command: list[str], destination: Path, executable: str | None = 
     size = 0
     with partial.open('xb') as output:
         process = subprocess.Popen(command, executable=executable, stdout=subprocess.PIPE)
+        assert process.stdout is not None  # stdout=PIPE 계약을 정적 검사에서도 명확히 한다.
         try:
             while chunk := process.stdout.read(1024 * 1024):
                 output.write(chunk)
