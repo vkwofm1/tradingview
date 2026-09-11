@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
 
+import pytest
+
 from app import adoption_metrics, db
 
 
@@ -71,16 +73,20 @@ def test_postgres_schema_uses_timezone_aware_timestamps(monkeypatch):
     assert connection.commits == 1
 
 
-def test_stock_snapshot_publishes_candles_data_and_completion_in_one_commit(monkeypatch):
+@pytest.mark.parametrize("error", [None, "fcf_missing"])
+def test_stock_snapshot_publishes_candles_data_and_completion_in_one_commit(monkeypatch, error):
     connection = _Connection()
     monkeypatch.setattr(db, "DB_TYPE", "postgres")
     monkeypatch.setattr(db, "_get_postgres_conn", lambda: connection)
-    count = db.publish_stock_snapshots("job", [{"symbol": "AAPL", "frames": {"1d": [{"start_at": "2026-09-10T13:30:00+00:00"}]}, "payload": {"symbol": "AAPL"}}])
+    count = db.publish_stock_snapshots("job", [{"symbol": "AAPL", "frames": {"1d": [{"start_at": "2026-09-10T13:30:00+00:00"}]}, "payload": {"symbol": "AAPL"}}], error=error)
     assert count == 1
     assert connection.commits == 1
     assert len(connection.statements) == 3
     assert all("?" not in sql for sql, _ in connection.statements)
     assert "UPDATE jobs" in connection.statements[-1][0]
+    params = connection.statements[-1][1]
+    assert params[0] == ("partial" if error else "completed")
+    assert params[-2] == error
 
 
 def test_stock_postgres_publish_rolls_back_on_error(monkeypatch):

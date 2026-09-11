@@ -10,7 +10,7 @@ import httpx
 
 from app import db
 from app.us_stock_market import (
-    NY, aware, completed_candles, evidence_quality, number,
+    NY, aware, completed_candles, evidence_quality, financial_evidence_missing, number,
     recover_completed_candles, required_market_times,
 )
 from app.us_stock_research import cost_model, financial_metrics, price_plan, valuation
@@ -39,10 +39,16 @@ async def _request_spacing(delay_sec, jitter_sec):
 
 async def _chart(client, symbol, interval, period):
     for attempt in range(3):
-        response = await client.get(
-            f"{YF_URL}/{symbol}",
-            params={"range": period, "interval": interval, "includePrePost": "false"},
-        )
+        try:
+            response = await client.get(
+                f"{YF_URL}/{symbol}",
+                params={"range": period, "interval": interval, "includePrePost": "false"},
+            )
+        except httpx.TransportError:
+            if attempt == 2:
+                raise
+            await asyncio.sleep(2 * (attempt + 1))
+            continue
         if response.status_code in (429, 502, 503, 504) and attempt < 2:
             await asyncio.sleep(2 * (attempt + 1))
             continue
@@ -77,26 +83,46 @@ async def _financials(symbol, now):
     previous = db.query_market_data("stocks", symbol, 1)
     cached = (previous[0]["payload"].get("fundamentals") or {}) if previous else {}
     fetched = aware(cached.get("fetched_at"))
-    if (
-        fetched
-        and timedelta(0) <= now - fetched < timedelta(hours=24)
-        and all(
-            number(cached.get(key)) is not None
-            for key in ("fcf", "net_debt", "roic_pct")
+
+    def usable(values):
+        shares = number(values.get("shares_outstanding"))
+        return (
+            not financial_evidence_missing(values, now)
+            and shares is not None and shares > 0
         )
-    ):
+
+    cache_valid = usable(cached)
+    if cache_valid and now - fetched < timedelta(hours=24):
         return cached
     try:
-        return await asyncio.wait_for(
+        refreshed = await asyncio.wait_for(
             asyncio.to_thread(_fetch_financials, symbol, now), timeout=120
         )
+        if usable(refreshed) or refreshed.get("reason") in {
+            "currency_mismatch_or_unsupported",
+            "financial_sector_requires_specialized_model",
+        }:
+            return refreshed
+        refresh = {
+            "status": "incomplete", "attempted_at": now.isoformat(),
+            "missing": financial_evidence_missing(refreshed, now),
+        }
+        shares = number(refreshed.get("shares_outstanding"))
+        if shares is None or shares <= 0:
+            refresh["missing"].append("shares_outstanding")
     except Exception as exc:
-        # 오래된 자료를 오늘 조회한 것처럼 다시 찍지 않는다.
-        return {
+        refresh = {
+            "status": "failed", "attempted_at": now.isoformat(),
+            "error": type(exc).__name__,
+        }
+        refreshed = {
             "source": "yahoo_finance_statements",
             "error": type(exc).__name__,
             "fetched_at": None,
         }
+    # 24시간 갱신 실패는 기존 48시간 품질 기한 안에서만 복구한다.
+    # 원래 조회 시각과 결산일을 보존하며, 만료·부적합 자료는 복구하지 않는다.
+    return {**(cached if cache_valid else refreshed), "refresh": refresh}
 
 
 async def collect(job_id: str, symbols: list[str] | None = None) -> int:
@@ -189,25 +215,30 @@ async def collect(job_id: str, symbols: list[str] | None = None) -> int:
                 if filtered is None:
                     continue
                 filtered["data_quality"] = evidence_quality(filtered)
-                if not filtered["data_quality"]["ready"]:
-                    raise ValueError(
-                        "us_stock_evidence_incomplete:"
-                        + ",".join(filtered["data_quality"]["missing"])
-                    )
-                snapshots.append(
-                    {"symbol": symbol, "payload": filtered, "frames": frames}
+                incomplete = (
+                    "us_stock_evidence_incomplete:"
+                    + ",".join(filtered["data_quality"]["missing"])
+                    if not filtered["data_quality"]["ready"] else None
                 )
+                # 정상 시세·완료봉을 재무 API 장애 때문에 함께 버리지 않는다.
+                if filtered["data_quality"]["market_ready"]:
+                    snapshots.append({
+                        "symbol": symbol, "payload": filtered,
+                        "frames": frames, "error": incomplete,
+                    })
+                if not filtered["data_quality"]["ready"]:
+                    raise ValueError(incomplete)
             except Exception as exc:
                 errors.append(f"{symbol}:{type(exc).__name__}:{exc}")
             await _request_spacing(delay, jitter)
-    # 부분 성공을 전체 성공으로 표시하지 않고 이전 완료 snapshot을 보존한다.
+    # 전체 실패 상태와 종목별 부분/완료 상태를 분리하고 기존 이력은 보존한다.
     if errors:
-        # 한 종목의 API 실패가 나머지 후보까지 굶기지 않도록 성공 종목만
-        # 독립된 완료 job으로 공개한다. 부모 job은 실패 원인을 그대로 남긴다.
+        # 재무 미완성 종목은 partial, 전체 근거 확보 종목은 completed로 공개한다.
+        # 부모 job은 실패 원인을 그대로 남기며 투자 준비 완료로 위장하지 않는다.
         for snapshot in snapshots:
             child_id = f"{job_id}-{snapshot['symbol']}"
             db.create_job(child_id, "stocks")
-            db.publish_stock_snapshots(child_id, [snapshot])
+            db.publish_stock_snapshots(child_id, [snapshot], error=snapshot["error"])
         raise RuntimeError("us_stock_collection_failed:" + ";".join(errors))
     return db.publish_stock_snapshots(job_id, snapshots)
 

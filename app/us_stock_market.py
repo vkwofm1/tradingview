@@ -198,7 +198,28 @@ def evidence_quality(payload, now=None):
             missing.append(f"completed_{interval}")
         if number(coverage.get("latest_volume")) is None:
             missing.append(f"volume_{interval}")
+    market_missing = list(missing)
     financials = payload.get("fundamentals") or {}
+    missing.extend(financial_evidence_missing(financials, now))
+    if number((payload.get("valuation") or {}).get("market_cap_estimate")) is None:
+        missing.append("valuation")
+    research_missing = missing[len(market_missing):]
+    return {
+        "ready": not missing,
+        "market_ready": not market_missing,
+        "research_ready": not research_missing,
+        "market_missing": market_missing,
+        "research_missing": research_missing,
+        "missing": missing,
+        "checked_at": now.isoformat(),
+        "required_daily_end": required_daily.isoformat(),
+        "required_60m_end": required_hourly.isoformat(),
+    }
+
+
+def financial_evidence_missing(financials, now):
+    """조회와 캐시 복구에 같은 재무 신선도·필수 지표 기준을 적용한다."""
+    missing = []
     for key in ("fcf", "net_debt", "roic_pct"):
         if number(financials.get(key)) is None:
             missing.append(key)
@@ -212,12 +233,4 @@ def evidence_quality(payload, now=None):
             missing.append("financial_period")
     except (ValueError, TypeError):
         missing.append("financial_period")
-    if number((payload.get("valuation") or {}).get("market_cap_estimate")) is None:
-        missing.append("valuation")
-    return {
-        "ready": not missing,
-        "missing": missing,
-        "checked_at": now.isoformat(),
-        "required_daily_end": required_daily.isoformat(),
-        "required_60m_end": required_hourly.isoformat(),
-    }
+    return missing

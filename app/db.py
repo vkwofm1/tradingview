@@ -465,8 +465,10 @@ def insert_market_candles(
     return len(values)
 
 
-def publish_stock_snapshots(job_id: str, snapshots: list[dict]) -> int:
-    """미국 주식 스냅샷·완료봉·성공 상태를 하나의 트랜잭션으로 공개한다."""
+def publish_stock_snapshots(
+    job_id: str, snapshots: list[dict], *, error: str | None = None,
+) -> int:
+    """스냅샷·완료봉·완료/부분 상태를 원자적으로 공개한다. 재무 누락은 성공이 아니다."""
     connection = _get_postgres_conn() if is_postgres() else _get_sqlite_conn()
     stamp = datetime.now(timezone.utc).isoformat()
     candle_sql = """INSERT INTO market_candles
@@ -475,7 +477,7 @@ def publish_stock_snapshots(job_id: str, snapshots: list[dict]) -> int:
         DO UPDATE SET job_id=excluded.job_id,payload=excluded.payload,collected_at=excluded.collected_at
         WHERE market_candles.payload <> excluded.payload"""
     data_sql = "INSERT INTO market_data(job_id,collector,symbol,payload,collected_at) VALUES(?,?,?,?,?)"
-    finish_sql = "UPDATE jobs SET status='completed',finished_at=?,result_count=?,error=NULL WHERE id=?"
+    finish_sql = "UPDATE jobs SET status=?,finished_at=?,result_count=?,error=? WHERE id=?"
     if is_postgres():
         candle_sql, data_sql, finish_sql = (s.replace("?", "%s") for s in (candle_sql, data_sql, finish_sql))
     cursor = connection.cursor()
@@ -488,7 +490,9 @@ def publish_stock_snapshots(job_id: str, snapshots: list[dict]) -> int:
                     for row in rows
                 ])
             cursor.execute(data_sql, (job_id, "stocks", symbol, json.dumps(snapshot["payload"], allow_nan=False), stamp))
-        cursor.execute(finish_sql, (stamp, len(snapshots), job_id))
+        cursor.execute(finish_sql, (
+            "partial" if error else "completed", stamp, len(snapshots), error, job_id,
+        ))
         connection.commit()
     except BaseException:
         connection.rollback()
@@ -1164,7 +1168,7 @@ def get_job_failure_rates(
             },
         )
         item["jobs_24h"] += 1
-        if row["status"] == "failed":
+        if row["status"] in {"failed", "partial"}:
             item["failed_jobs_24h"] += 1
             if item["last_error"] is None:
                 item["last_error"] = row.get("error")

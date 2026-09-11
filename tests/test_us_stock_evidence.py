@@ -314,6 +314,21 @@ async def test_missing_financial_evidence_cannot_mark_job_complete(isolated_db, 
         result = await run_collector("stocks", stocks.collect, ["AAPL"])
     assert result["status"] == "failed"
     assert "fcf" in result["error"]
+    record = stocks.query_evidence(["AAPL"])[0]
+    assert record["data_quality"]["market_ready"]
+    assert not record["data_quality"]["research_ready"]
+    assert not record["data_quality"]["ready"]
+    assert not record["cost_verified_3r"]
+    assert not record["execution_authorized"]
+    partial = db.get_job(record["job_id"])
+    assert partial["status"] == "partial"
+    assert "fcf" in partial["error"]
+    rates = db.get_job_failure_rates()[0]
+    assert rates["failure_rate_pct"] == 100
+    assert rates["success_rate_pct"] == 0
+    assert rates["alert"]
+    assert len(db.query_market_candles("stocks", "AAPL", "1d", 100)) >= 20
+    assert len(db.query_market_candles("stocks", "AAPL", "60m", 200)) >= 120
 
 
 @pytest.mark.asyncio
@@ -336,7 +351,8 @@ async def test_excluded_empty_universe_does_not_restore_defaults(isolated_db):
     assert db.query_market_data("stocks") == []
 
 
-def test_atomic_snapshot_failure_rolls_back_candles(isolated_db):
+@pytest.mark.parametrize("error", [None, "fcf_missing"])
+def test_atomic_snapshot_failure_rolls_back_candles(isolated_db, error):
     db.create_job("broken", "stocks")
     with pytest.raises(ValueError):
         db.publish_stock_snapshots(
@@ -348,6 +364,7 @@ def test_atomic_snapshot_failure_rolls_back_candles(isolated_db):
                     "payload": {"bad": float("nan")},
                 }
             ],
+            error=error,
         )
     assert db.query_market_candles("stocks", "AAPL", "1d") == []
     assert db.get_job("broken")["status"] == "running"
@@ -421,3 +438,93 @@ async def test_rate_limit_retries_are_bounded(monkeypatch):
             with pytest.raises(httpx.HTTPStatusError):
                 await stocks._chart(client, "AAPL", "1d", "6mo")
         assert route.call_count == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [httpx.ConnectError, httpx.ReadTimeout])
+async def test_transport_failure_is_retried_and_bounded(monkeypatch, failure):
+    pause = AsyncMock()
+    monkeypatch.setattr(stocks.asyncio, "sleep", pause)
+    with respx.mock as router:
+        route = router.get(f"{stocks.YF_URL}/AAPL").mock(side_effect=[
+            failure("transient"),
+            httpx.Response(200, json={"chart": {"result": [chart("1d")]}}),
+        ])
+        async with httpx.AsyncClient() as client:
+            assert (await stocks._chart(client, "AAPL", "1d", "6mo"))["timestamp"]
+        assert route.call_count == 2
+        assert pause.await_count == 1
+        route.reset()
+        route.mock(side_effect=failure("unavailable"))
+        async with httpx.AsyncClient() as client:
+            with pytest.raises(failure):
+                await stocks._chart(client, "AAPL", "1d", "6mo")
+        assert route.call_count == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["exception", "incomplete"])
+@pytest.mark.parametrize("age_hours", [25, 48, 49])
+async def test_financial_refresh_failure_preserves_only_unexpired_cache(
+    isolated_db, monkeypatch, failure, age_hours,
+):
+    cached = financial_metrics(*financials(), now=NOW - timedelta(hours=age_hours))
+    monkeypatch.setattr(db, "query_market_data", lambda *_: [{"payload": {"fundamentals": cached}}])
+
+    def refresh(*_):
+        if failure == "exception":
+            raise TimeoutError("unavailable")
+        return {"fcf": None, "fetched_at": NOW.isoformat()}
+
+    monkeypatch.setattr(stocks, "_fetch_financials", refresh)
+    result = await stocks._financials("AAPL", NOW)
+    assert result["refresh"]["attempted_at"] == NOW.isoformat()
+    if age_hours <= 48:
+        assert result["fcf"] == cached["fcf"]
+        assert result["fetched_at"] == cached["fetched_at"]
+        assert result["period_end"] == cached["period_end"]
+        assert "fresh_fundamentals" in evidence_quality(
+            {"fundamentals": result}, NOW + timedelta(hours=49)
+        )["missing"]
+    else:
+        assert result.get("fcf") is None
+    assert "refresh" not in cached
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid", ["future", "period", "shares", "currency"])
+async def test_invalid_cache_or_new_currency_mismatch_is_not_rescued(
+    isolated_db, monkeypatch, invalid,
+):
+    cached = financial_metrics(*financials(), now=NOW - timedelta(hours=25))
+    refreshed = {}
+    if invalid == "future":
+        cached["fetched_at"] = (NOW + timedelta(hours=1)).isoformat()
+    elif invalid == "period":
+        cached["period_end"] = "2020-01-01"
+    elif invalid == "shares":
+        cached["shares_outstanding"] = -1
+    else:
+        refreshed["reason"] = "currency_mismatch_or_unsupported"
+    monkeypatch.setattr(db, "query_market_data", lambda *_: [{"payload": {"fundamentals": cached}}])
+    monkeypatch.setattr(stocks, "_fetch_financials", lambda *_: refreshed)
+    assert (await stocks._financials("AAPL", NOW)).get("fcf") is None
+
+
+@pytest.mark.asyncio
+async def test_partial_financial_snapshot_recovers_on_next_scheduled_attempt(
+    isolated_db, monkeypatch,
+):
+    original = stocks._fetch_financials
+    monkeypatch.setattr(stocks, "_fetch_financials", lambda *_: {})
+    with respx.mock as router:
+        routes(router)
+        first = await run_collector("stocks", stocks.collect, ["AAPL"])
+        partial = stocks.query_evidence(["AAPL"])[0]
+        assert first["status"] == "failed"
+        assert partial["data_quality"]["market_ready"]
+        monkeypatch.setattr(stocks, "_fetch_financials", original)
+        second = await run_collector("stocks", stocks.collect, ["AAPL"])
+    assert second["status"] == "completed"
+    assert stocks.query_evidence(["AAPL"])[0]["data_quality"]["ready"]
+    assert db.get_job(partial["job_id"])["status"] == "partial"
