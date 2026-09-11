@@ -102,6 +102,32 @@ def test_windows_tools_receive_native_argv0(monkeypatch):
     assert options['executable'] == str(archive.BIN / 'pg_restore.exe')
 
 
+def test_archive_restore_keeps_all_data_constraints_and_lookup_indexes():
+    toc = '\n'.join([
+        '1; 0 1 TABLE DATA public market_candles owner',
+        '2; 1 2 CONSTRAINT public market_candles market_candles_pkey owner',
+        '3; 1 3 INDEX public idx_mc_collector owner',
+        '4; 1 4 INDEX public idx_mc_collector_symbol_time owner',
+        '5; 1 5 FK CONSTRAINT public market_candles market_candles_job_id_fkey owner',
+        '6; 1 6 INDEX public newly_added_index owner',
+    ])
+    lines = archive.archive_restore_list(toc).splitlines()
+    assert lines[2].startswith('; ')
+    assert all(not lines[i].startswith(';') for i in (0, 1, 3, 4, 5))
+
+
+def test_restore_pauses_staging_maintenance_before_loading_data(monkeypatch):
+    events = []
+    monkeypatch.setattr(archive, 'psql', lambda query, database: events.append(('sql', query, database)))
+    monkeypatch.setattr(archive, 'windows_run', lambda tool, args, **kw: events.append(
+        ('restore', args[args.index('--section') + 1], args[args.index('-j') + 1])))
+    archive.restore_to_stage(archive.ROOT / 'backup.dump', 'stage_test', archive.ROOT / 'backup.list')
+    assert events[0] == ('restore', 'pre-data', '1')
+    assert all(event[0] == 'sql' and 'autovacuum_enabled=false' in event[1] and event[2] == 'stage_test'
+               for event in events[1:4])
+    assert events[4:] == [('restore', 'data', '1'), ('restore', 'post-data', '1')]
+
+
 def test_dump_failure_keeps_partial_without_publishing(tmp_path):
     destination = tmp_path / 'backup.dump'
     with pytest.raises(RuntimeError, match='partial dump preserved'):
@@ -117,18 +143,19 @@ def test_native_cumulative_dump_restores_historical_rows(monkeypatch):
     for database in (source, restored):
         archive.psql(f'CREATE DATABASE {archive.ident(database)} TEMPLATE template0;')
     try:
-        archive.psql("CREATE TABLE jobs(id integer PRIMARY KEY,payload text);"
-                     "INSERT INTO jobs VALUES(1,'historical'),(2,'current');", source)
+        for table in archive.TABLES:
+            archive.psql(f'CREATE TABLE {archive.ident(table)}(id integer PRIMARY KEY,payload text);'
+                         f"INSERT INTO {archive.ident(table)} VALUES(1,'historical'),(2,'current');", source)
         monkeypatch.setattr(archive, 'DATABASE', source)
         with tempfile.TemporaryDirectory(prefix='archive-verify-', dir=archive.ROOT / 'backups') as folder:
             dump = Path(folder) / 'archive.dump'
             digest, size = archive.dump_archive(dump)
             assert len(digest) == 64 and size > 100
-            result = archive.windows_run('pg_restore.exe', [
-                '-h', '127.0.0.1', '-p', '55432', '-U', 'archive_owner', '-w',
-                '-d', restored, '--exit-on-error', '--no-owner', '--no-acl', '-j', '2', archive.winpath(dump),
-            ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
-            assert not result.stderr
+            result = archive.windows_run('pg_restore.exe', ['--list', archive.winpath(dump)],
+                                         check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+            restore_list = Path(folder) / 'archive.list'
+            restore_list.write_text(archive.archive_restore_list(result.stdout.decode()))
+            archive.restore_to_stage(dump, restored, restore_list)
             assert archive.psql("SELECT string_agg(payload,',' ORDER BY id) FROM jobs;", restored) == 'historical,current'
     finally:
         for database in (source, restored):

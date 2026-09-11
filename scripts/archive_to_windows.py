@@ -20,6 +20,11 @@ ROOT = Path('/mnt/d/PostgreSQL')
 BIN = ROOT / '16.15/pgsql/bin'
 DATABASE = 'tradingview_archive'
 TABLES = ('jobs', 'market_data', 'market_candles')
+# 보관 조회에는 복합 인덱스의 선두 컬럼을 사용한다. 원본 덤프의 정의는 그대로 보존한다.
+OMITTED_ARCHIVE_INDEXES = frozenset({
+    'idx_mc_collector', 'idx_mc_job_collector_interval', 'idx_mc_symbol', 'idx_mc_time',
+    'idx_md_collector', 'idx_md_collector_job_id', 'idx_md_symbol',
+})
 GIB = 1024**3
 SCHEMA_SQL = """
 SELECT json_object_agg(t.table_name, t.cols) FROM (
@@ -171,6 +176,30 @@ def dump_archive(destination: Path) -> tuple[str, int]:
     ], destination, executable=str(executable))
 
 
+def archive_restore_list(toc: str) -> str:
+    lines = []
+    for line in toc.splitlines():
+        match = re.match(r'^\d+; \d+ \d+ INDEX public (\S+) ', line)
+        if match and match.group(1) in OMITTED_ARCHIVE_INDEXES:
+            line = '; ' + line
+        lines.append(line)
+    return '\n'.join(lines) + '\n'
+
+
+def restore_to_stage(source_dump: Path, stage: str, restore_list: Path) -> None:
+    arguments = [
+        '-h', '127.0.0.1', '-p', '55432', '-U', 'archive_owner',
+        '-w', '-d', stage, '--exit-on-error', '--no-owner', '--no-acl', '-j', '1',
+        '--use-list', winpath(restore_list),
+    ]
+    for section in ('pre-data', 'data', 'post-data'):
+        if section == 'data':
+            for table in TABLES:
+                psql(f'ALTER TABLE public.{ident(table)} SET (autovacuum_enabled=false);', stage)
+        windows_run('pg_restore.exe', [*arguments, '--section', section, winpath(source_dump)],
+                    check=True, timeout=7200)
+
+
 def verify_counts(info: dict, database: str) -> None:
     for table, expected in info['counts'].items():
         count = int(psql(f'SELECT count(*) FROM public.{ident(table)};', database))
@@ -217,6 +246,9 @@ def merge_sql(stage: str, info: dict) -> str:
 
 
 def configure_reader() -> None:
+    # 대용량 staging 적재 중 중지했던 자동 유지관리를 게시된 DB에서 다시 켠다.
+    for table in TABLES:
+        psql(f'ALTER TABLE public.{ident(table)} RESET (autovacuum_enabled);', DATABASE)
     psql("""DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='archive_reader')
       THEN CREATE ROLE archive_reader LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
       END IF; END $$;
@@ -301,14 +333,14 @@ def run() -> None:
     with pending.open('x') as output:
         json.dump({'status': 'pending', 'run_id': run_id, 'source': info,
                    'source_dump': source_dump.name, 'sha256': digest, 'dump_bytes': size}, output)
-    windows_run('pg_restore.exe', ['--list', winpath(source_dump)],
-                stdout=subprocess.DEVNULL, check=True, timeout=60)
+    toc = windows_run('pg_restore.exe', ['--list', winpath(source_dump)],
+                      capture_output=True, check=True, timeout=60)
+    restore_list = backups / (run_id + '.restore.list')
+    with restore_list.open('x') as output:
+        output.write(archive_restore_list(toc.stdout.decode()))
     psql(f'CREATE DATABASE {ident(stage)} OWNER archive_owner TEMPLATE template0;')
     report('restore_started', database=stage)
-    windows_run('pg_restore.exe', [
-        '-h', '127.0.0.1', '-p', '55432', '-U', 'archive_owner',
-        '-w', '-d', stage, '--exit-on-error', '--no-owner', '--no-acl', '-j', '2', winpath(source_dump),
-    ], check=True, timeout=7200)
+    restore_to_stage(source_dump, stage, restore_list)
     verify_counts(info, stage)
     if psql(f'SELECT 1 FROM pg_database WHERE datname={literal(DATABASE)};') != '1':
         psql(f'ALTER DATABASE {ident(stage)} RENAME TO {ident(DATABASE)};')
@@ -340,6 +372,7 @@ def run() -> None:
     with dump.with_suffix('.json').open('x') as output:
         json.dump(manifest, output, ensure_ascii=False, indent=2)
     pending.unlink()
+    restore_list.unlink()
     removed = rotate_verified_dumps(backups)
     report('verified', run_id=run_id, database=DATABASE, removed_own_old_dumps=removed,
            source_deletion_enabled=False, d_free_bytes=shutil.disk_usage(ROOT).free)
