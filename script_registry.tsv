@@ -1,3 +1,5 @@
 path	purpose
 scripts/windows_archive_server.ps1	Windows SSPI 인증의 D드라이브 보관 PostgreSQL 초기화·시작·조회
 scripts/archive_to_windows.py	운영 PostgreSQL의 일관된 덤프·복원 검증·보관 데이터 병합; 원본 삭제 금지
+scripts/expand_wsl_disk.ps1	승인된 WSL 256→406GiB 증설; Windows 관리자 실행·정상 종료·재기동·결과 보존
+scripts/finish_wsl_resize.sh	406GiB 디스크 확인 후 ext4 확장과 기존 WSL 호스트 서비스 재기동 검증
