@@ -1,0 +1,13 @@
+[Unit]
+Description=TradingView verified backup and Windows D archive
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/vkwofm/tradingview-pg
+Environment=PATH=/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/python3 /home/vkwofm/tradingview-pg/scripts/archive_to_windows.py --run
+TimeoutStartSec=3h
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7

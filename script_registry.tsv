@@ -1,0 +1,3 @@
+path	purpose
+scripts/windows_archive_server.ps1	Windows SSPI 인증의 D드라이브 보관 PostgreSQL 초기화·시작·조회
+scripts/archive_to_windows.py	운영 PostgreSQL의 일관된 덤프·복원 검증·보관 데이터 병합; 원본 삭제 금지

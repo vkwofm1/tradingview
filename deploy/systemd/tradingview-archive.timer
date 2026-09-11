@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily TradingView archive backup
+
+[Timer]
+OnCalendar=*-*-* 04:20:00 Asia/Seoul
+Persistent=true
+RandomizedDelaySec=120
+Unit=tradingview-archive.service
+
+[Install]
+WantedBy=timers.target
