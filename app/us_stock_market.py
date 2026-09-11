@@ -122,6 +122,57 @@ def completed_candles(chart, interval, now):
     return [result[key] for key in sorted(result)]
 
 
+def recover_completed_candles(current, cached, chart, interval, now):
+    """이미 검증된 완료봉만 재사용한다. 새 유효 봉 우선, 원시값 충돌 시 복구 금지."""
+    eligible = [
+        row for row in cached
+        if row.get("is_complete") is True
+        and row.get("interval") == interval
+        and row.get("source") == "yahoo_chart"
+        and aware(row.get("start_at")) is not None
+    ]
+    fields = ("open", "high", "low", "close", "volume")
+    reconstructed = {
+        "timestamp": [aware(row["start_at"]).timestamp() for row in eligible],
+        "indicators": {"quote": [{
+            field: [row.get(field) for row in eligible] for field in fields
+        }]},
+    }
+    checked = {
+        row["start_at"]: row
+        for row in completed_candles(reconstructed, interval, now)
+    }
+    raw_indices = {
+        datetime.fromtimestamp(timestamp, timezone.utc).isoformat(): i
+        for i, timestamp in enumerate(chart.get("timestamp") or [])
+    }
+    quote = (chart.get("indicators", {}).get("quote") or [{}])[0]
+    merged = {}
+    for row in eligible:
+        valid = checked.get(row["start_at"])
+        if not valid or any(
+            row.get(key) != valid[key] for key in ("end_at", "session")
+        ):
+            continue
+        index = raw_indices.get(row["start_at"])
+        conflict = False
+        if index is not None:
+            for field in fields:
+                values = quote.get(field) or []
+                supplied = number(values[index]) if index < len(values) else None
+                if supplied is not None and not math.isclose(
+                    supplied, valid[field], rel_tol=1e-9, abs_tol=1e-9
+                ):
+                    conflict = True
+                    break
+        if not conflict:
+            merged[row["start_at"]] = row
+    current_keys = {row["start_at"] for row in current}
+    reused = sorted(set(merged) - current_keys)
+    merged.update({row["start_at"]: row for row in current})
+    return [merged[key] for key in sorted(merged)], reused
+
+
 def evidence_quality(payload, now=None):
     now = now or datetime.now(timezone.utc)
     missing = []

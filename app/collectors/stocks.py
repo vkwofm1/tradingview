@@ -9,7 +9,10 @@ import re
 import httpx
 
 from app import db
-from app.us_stock_market import NY, aware, completed_candles, evidence_quality, number
+from app.us_stock_market import (
+    NY, aware, completed_candles, evidence_quality, number,
+    recover_completed_candles, required_market_times,
+)
 from app.us_stock_research import cost_model, financial_metrics, price_plan, valuation
 
 YF_URL = "https://query1.finance.yahoo.com/v8/finance/chart"
@@ -118,6 +121,21 @@ async def collect(job_id: str, symbols: list[str] | None = None) -> int:
                 now = datetime.now(timezone.utc)
                 daily = completed_candles(daily_chart, "1d", now)
                 hourly = completed_candles(hourly_chart, "60m", now)
+                frames, recovered = {"1d": daily, "60m": hourly}, {}
+                required = dict(zip(("1d", "60m"), required_market_times(now)))
+                for interval, chart in (("1d", daily_chart), ("60m", hourly_chart)):
+                    rows = frames[interval]
+                    if len(rows) < 20 or aware(rows[-1]["end_at"]) < required[interval]:
+                        cached = db.query_market_candles("stocks", symbol, interval, 200)
+                        frames[interval], reused = recover_completed_candles(
+                            rows, [row["payload"] for row in cached], chart, interval, now
+                        )
+                        if reused:
+                            recovered[interval] = {
+                                "source": "validated_stored_completed_candles",
+                                "reused_start_at": reused,
+                            }
+                daily, hourly = frames["1d"], frames["60m"]
                 meta = hourly_chart["meta"]
                 price = number(meta.get("regularMarketPrice"))
                 if (
@@ -135,7 +153,6 @@ async def collect(job_id: str, symbols: list[str] | None = None) -> int:
                     else None
                 )
                 fundamentals = await _financials(symbol, now)
-                frames = {"1d": daily, "60m": hourly}
                 quote_session = aware(price_at).astimezone(NY).date().isoformat() if price_at else ""
                 previous_close = next((r["close"] for r in reversed(daily) if r["session"] < quote_session), None)
                 payload = {
@@ -153,6 +170,7 @@ async def collect(job_id: str, symbols: list[str] | None = None) -> int:
                     / len(daily[-20:]),
                     "volume_as_of": daily[-1]["end_at"],
                     "fetched_at": now.isoformat(),
+                    "candle_recovery": recovered,
                     "candles": {
                         interval: {
                             "count": len(rows),
@@ -171,6 +189,11 @@ async def collect(job_id: str, symbols: list[str] | None = None) -> int:
                 if filtered is None:
                     continue
                 filtered["data_quality"] = evidence_quality(filtered)
+                if not filtered["data_quality"]["ready"]:
+                    raise ValueError(
+                        "us_stock_evidence_incomplete:"
+                        + ",".join(filtered["data_quality"]["missing"])
+                    )
                 snapshots.append(
                     {"symbol": symbol, "payload": filtered, "frames": frames}
                 )

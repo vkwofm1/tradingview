@@ -10,7 +10,9 @@ from app import db
 from app.collectors import stocks
 from app.runner import run_collector
 from app.scheduler import _interval_for
-from app.us_stock_market import completed_candles, evidence_quality, session_bounds
+from app.us_stock_market import (
+    completed_candles, evidence_quality, recover_completed_candles, session_bounds,
+)
 from app.us_stock_research import cost_model, financial_metrics, price_plan
 
 NOW = datetime(2026, 9, 11, tzinfo=timezone.utc)
@@ -233,6 +235,85 @@ async def test_collector_publishes_all_evidence_and_uses_financial_cache(
     )
     assert not stale["ready"]
     assert "completed_1d" in stale["missing"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interval,field", [("1d", "close"), ("1d", "volume"), ("60m", "close")])
+async def test_provider_partial_bar_does_not_regress_stored_complete_evidence(
+    isolated_db, interval, field
+):
+    with respx.mock as router:
+        routes(router)
+        initial = await run_collector("stocks", stocks.collect, ["AAPL"])
+        assert initial["status"] == "completed"
+        original = db.query_market_candles("stocks", "AAPL", interval, 1)[0]
+        data = chart(interval)
+        index = data["timestamp"].index(
+            datetime.fromisoformat(original["payload"]["start_at"]).timestamp()
+        )
+        data["indicators"]["quote"][0][field][index] = None
+        router.get(f"{stocks.YF_URL}/AAPL", params={"interval": interval}).respond(
+            200, json={"chart": {"result": [data]}}
+        )
+        refreshed = await run_collector("stocks", stocks.collect, ["AAPL"])
+    assert refreshed["status"] == "completed"
+    evidence = stocks.query_evidence(["AAPL"])[0]
+    assert evidence["data_quality"]["ready"]
+    recovery = evidence["payload"]["candle_recovery"][interval]
+    assert original["payload"]["start_at"] in recovery["reused_start_at"]
+    saved = db.query_market_candles("stocks", "AAPL", interval, 1)[0]
+    assert saved["collected_at"] == original["collected_at"]
+    assert saved["payload"] == original["payload"]
+
+
+@pytest.mark.asyncio
+async def test_partial_latest_bar_without_valid_cache_is_failed(isolated_db):
+    with respx.mock as router:
+        routes(router)
+        data = chart("1d")
+        data["indicators"]["quote"][0]["close"][-1] = None
+        router.get(f"{stocks.YF_URL}/AAPL", params={"interval": "1d"}).respond(
+            200, json={"chart": {"result": [data]}}
+        )
+        result = await run_collector("stocks", stocks.collect, ["AAPL"])
+    assert result["status"] == "failed"
+    assert "completed_1d" in result["error"]
+    assert db.query_market_data("stocks", "AAPL", 1) == []
+
+
+def test_cache_recovery_rejects_conflicts_invalid_ohlc_and_open_bars():
+    data = chart("1d", dates=["2026-09-10"])
+    cached = completed_candles(data, "1d", NOW)
+    data["indicators"]["quote"][0]["close"][-1] = None
+    data["indicators"]["quote"][0]["volume"][-1] = 2000
+    assert recover_completed_candles([], cached, data, "1d", NOW) == ([], [])
+    data["indicators"]["quote"][0]["volume"][-1] = 1000
+    before_close = datetime(2026, 9, 10, 19, tzinfo=timezone.utc)
+    assert recover_completed_candles([], cached, data, "1d", before_close) == ([], [])
+    cached[0]["low"] = 130
+    assert recover_completed_candles([], cached, data, "1d", NOW) == ([], [])
+
+
+def test_recovered_old_session_does_not_satisfy_next_required_close():
+    data = chart("1d", dates=["2026-09-10"])
+    cached = completed_candles(data, "1d", NOW)
+    data["indicators"]["quote"][0]["close"][-1] = None
+    later = datetime(2026, 9, 11, 21, tzinfo=timezone.utc)
+    rows, _ = recover_completed_candles([], cached, data, "1d", later)
+    quality = evidence_quality({"candles": {"1d": {
+        "count": 20, "latest_end_at": rows[-1]["end_at"], "latest_volume": 1000,
+    }}}, later)
+    assert "completed_1d" in quality["missing"]
+
+
+@pytest.mark.asyncio
+async def test_missing_financial_evidence_cannot_mark_job_complete(isolated_db, monkeypatch):
+    monkeypatch.setattr(stocks, "_financials", AsyncMock(return_value={}))
+    with respx.mock as router:
+        routes(router)
+        result = await run_collector("stocks", stocks.collect, ["AAPL"])
+    assert result["status"] == "failed"
+    assert "fcf" in result["error"]
 
 
 @pytest.mark.asyncio
