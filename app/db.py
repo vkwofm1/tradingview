@@ -146,6 +146,8 @@ def _init_sqlite_db() -> None:
             FOREIGN KEY (job_id) REFERENCES jobs(id),
             UNIQUE (collector, symbol, interval, candle_time)
         );
+        CREATE INDEX IF NOT EXISTS idx_jobs_collector_status_created
+            ON jobs(collector, status, created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_md_symbol ON market_data(symbol);
         CREATE INDEX IF NOT EXISTS idx_md_collector ON market_data(collector);
         CREATE INDEX IF NOT EXISTS idx_md_collector_job_id
@@ -223,6 +225,10 @@ def _init_postgres_db() -> None:
         )
     """)
 
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_jobs_collector_status_created "
+        "ON jobs(collector, status, created_at DESC)"
+    )
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_md_symbol ON market_data(symbol)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_md_collector ON market_data(collector)")
     cursor.execute(

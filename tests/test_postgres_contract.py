@@ -70,7 +70,19 @@ def test_postgres_schema_uses_timezone_aware_timestamps(monkeypatch):
     assert "market_data(collector, symbol, collected_at)" in schema
     assert "idx_mc_collector_symbol_time" in schema
     assert "market_candles(collector, symbol, candle_time)" in schema
+    assert "idx_jobs_collector_status_created" in schema
+    assert "jobs(collector, status, created_at DESC)" in schema
     assert connection.commits == 1
+
+
+def test_latest_completed_job_uses_index_without_sorting_history(monkeypatch, tmp_path):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "jobs.sqlite3")
+    db._init_sqlite_db()
+    conn = db._get_sqlite_conn()
+    sql = "SELECT id,finished_at FROM jobs WHERE collector=? AND status=? ORDER BY created_at DESC LIMIT 1"
+    plan = " ".join(row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + sql, ("upbit", "completed")))
+    assert "idx_jobs_collector_status_created" in plan
+    assert "TEMP B-TREE" not in plan
 
 
 @pytest.mark.parametrize("error", [None, "fcf_missing"])
