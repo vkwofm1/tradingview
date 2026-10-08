@@ -75,8 +75,9 @@ def check_postgres_health() -> dict[str, Any]:
             raise RuntimeError("DATABASE_URL is required when DB_TYPE=postgres")
         conn = psycopg.connect(
             POSTGRES_URL,
-            connect_timeout=10,
+            connect_timeout=5,
             application_name="tradingview-health",
+            options="-c statement_timeout=5000 -c default_transaction_read_only=on",
         )
         cursor = conn.cursor()
 
@@ -88,15 +89,21 @@ def check_postgres_health() -> dict[str, Any]:
         cursor.execute("SELECT current_user, current_database()")
         user, database = cursor.fetchone()
 
-        # Table counts
-        cursor.execute("SELECT COUNT(*) FROM jobs")
-        jobs_count = cursor.fetchone()[0]
-
-        cursor.execute("SELECT COUNT(*) FROM market_data")
-        market_data_count = cursor.fetchone()[0]
-
-        cursor.execute("SELECT COUNT(*) FROM market_candles")
-        candles_count = cursor.fetchone()[0]
+        # 헬스 체크에서 대형 시계열 테이블 전체를 COUNT(*) 하지 않는다.
+        # PostgreSQL 통계의 추정 행 수는 즉시 반환되며 정확한 집계는 stats 경로의
+        # 별도 진단으로 남긴다.
+        cursor.execute(
+            """
+            SELECT relname, COALESCE(n_live_tup, 0)::bigint
+            FROM pg_stat_user_tables
+            WHERE schemaname = current_schema()
+              AND relname IN ('jobs', 'market_data', 'market_candles')
+            """
+        )
+        estimated_counts = {name: count for name, count in cursor.fetchall()}
+        jobs_count = estimated_counts.get("jobs", 0)
+        market_data_count = estimated_counts.get("market_data", 0)
+        candles_count = estimated_counts.get("market_candles", 0)
 
         # Database size
         cursor.execute(
@@ -139,6 +146,7 @@ def check_postgres_health() -> dict[str, Any]:
                 "market_data": market_data_count,
                 "market_candles": candles_count,
             },
+            "table_counts_exact": False,
             "total_records": jobs_count + market_data_count + candles_count,
             "database_size": db_size,
             "database_size_bytes": db_size_bytes,

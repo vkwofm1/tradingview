@@ -26,6 +26,11 @@ class _Cursor:
             return (False,)
         return (1,)
 
+    def fetchall(self):
+        if "pg_stat_user_tables" in self.query:
+            return [("jobs", 3), ("market_data", 5), ("market_candles", 8)]
+        return []
+
 
 class _Connection:
     def __init__(self):
@@ -52,6 +57,16 @@ def test_health_skips_pg_stat_statements_query_when_extension_is_absent(monkeypa
 
     assert result["healthy"] is True
     assert result["slow_queries_detected"] is None
+    assert result["tables"] == {
+        "jobs": 3,
+        "market_data": 5,
+        "market_candles": 8,
+    }
+    assert result["table_counts_exact"] is False
+    assert not any(
+        "SELECT COUNT(*) FROM market_candles" in query
+        for query in connection.cursor_instance.queries
+    )
     assert not any(
         "FROM pg_stat_statements" in query
         for query in connection.cursor_instance.queries
