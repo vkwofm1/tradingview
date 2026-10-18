@@ -77,6 +77,29 @@ def test_worker_rejects_arbitrary_table():
         worker.delete_sql("jobs; DROP DATABASE tradingview")
 
 
+def test_reclaim_targets_postgres_pod_not_restartable_app(monkeypatch):
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        if "VACUUM (FULL, ANALYZE) market_candles" in command:
+            return subprocess.CompletedProcess(command, 0, "", "")
+        size = 20 if len(calls) > 2 else 30
+        value = {"system_id": "1", "database": "db", "table_bytes": size, "last_analyze": None}
+        return subprocess.CompletedProcess(command, 0, json.dumps(value), "")
+
+    import subprocess
+
+    monkeypatch.setattr(pressure.subprocess, "run", run)
+    result = pressure.reclaim_source({
+        "action": "reclaim", "table": "market_candles",
+        "expected_source": {"system_id": "1", "database": "db"}, "max_table_bytes": 40,
+    })
+    assert result["relation_reclaimed_bytes"] == 10
+    assert all("statefulset/tradingview-postgres" in call for call in calls)
+    assert all("deployment/tradingview" not in call for call in calls)
+
+
 def test_large_table_triggers_before_rewrite_headroom_is_lost():
     assert not pressure.pressured(space(130, .6))
     assert pressure.pressured(space(130, .6), rewrite_reserve=120 * pressure.GIB)
@@ -184,6 +207,7 @@ def test_reclaim_timeout_resumes_only_verified_batch(pipeline, monkeypatch, tmp_
     monkeypatch.setattr(pressure, "source", original)
     monkeypatch.setattr(pressure, "require_archived_batch", lambda value: events.append("archive_reverified"))
     monkeypatch.setattr(pressure, "require_reclaim_reserve", lambda *_: None)
+    monkeypatch.setattr(pressure, "postgres_relation", lambda *_: {"table_bytes": pressure.GIB})
 
     assert pressure.run(execute=True, retry=True) == 0
     assert events.count("delete") == 1

@@ -49,6 +49,8 @@ def recovered(state: dict, rewrite_reserve: int = 0) -> bool:
 
 
 def source(request: dict) -> dict:
+    if request.get("action") == "reclaim":
+        return reclaim_source(request)
     timeout = RECLAIM_TIMEOUT_SECONDS if request.get("action") == "reclaim" else 55
     result = subprocess.run([
         "kubectl", "--context", CONTEXT, f"--request-timeout={timeout - 5}s", "exec", "-i", "-n", "default",
@@ -63,6 +65,59 @@ def source(request: dict) -> dict:
         raise RuntimeError(f"source {request['action']} failed: {error.get('error_type', 'transport')} "
                            f"SQLSTATE={error.get('sqlstate')}; no further source cleanup")
     return json.loads(result.stdout)
+
+
+def postgres_relation(table: str) -> dict:
+    if table not in TABLES:
+        raise ValueError("table outside archival scope")
+    query = (
+        "SELECT json_build_object('system_id',system_identifier::text,"
+        "'database',current_database(),'table_bytes',pg_total_relation_size("
+        + archive.literal(table)
+        + "::regclass),'last_analyze',(SELECT last_analyze FROM pg_stat_user_tables WHERE relname="
+        + archive.literal(table)
+        + ")) FROM pg_control_system()"
+    )
+    result = subprocess.run([
+        "kubectl", "--context", CONTEXT, f"--request-timeout={RECLAIM_TIMEOUT_SECONDS - 5}s",
+        "exec", "-i", "-n", "default", "statefulset/tradingview-postgres", "--", "sh", "-c",
+        'exec psql -X -At -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "$1"',
+        "archive-reclaim-metadata", query,
+    ], capture_output=True, text=True, timeout=RECLAIM_TIMEOUT_SECONDS)
+    if result.returncode:
+        raise RuntimeError("source reclaim metadata failed; no source cleanup")
+    return json.loads(result.stdout)
+
+
+def reclaim_source(request: dict) -> dict:
+    table = request["table"]
+    before = postgres_relation(table)
+    expected = request["expected_source"]
+    if {key: before[key] for key in ("system_id", "database")} != {
+        key: expected[key] for key in ("system_id", "database")
+    }:
+        raise RuntimeError("source identity changed before reclaim")
+    if before["table_bytes"] > int(request["max_table_bytes"]):
+        raise RuntimeError("table grew beyond reserved rewrite budget")
+    options = (
+        "-c statement_timeout=900000 -c lock_timeout=1000 -c temp_file_limit=8388608 "
+        "-c max_parallel_maintenance_workers=0"
+    )
+    result = subprocess.run([
+        "kubectl", "--context", CONTEXT, f"--request-timeout={RECLAIM_TIMEOUT_SECONDS - 5}s",
+        "exec", "-i", "-n", "default", "statefulset/tradingview-postgres", "--", "sh", "-c",
+        'PGOPTIONS="$1" exec psql -X -At -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" '
+        '-d "$POSTGRES_DB" -c "$2"',
+        "archive-reclaim", options, f"VACUUM (FULL, ANALYZE) {table}",
+    ], capture_output=True, text=True, timeout=RECLAIM_TIMEOUT_SECONDS)
+    if result.returncode:
+        raise RuntimeError("source reclaim failed: transport SQLSTATE=None; no further source cleanup")
+    after = postgres_relation(table)
+    return {
+        "table_before_bytes": before["table_bytes"],
+        "table_after_bytes": after["table_bytes"],
+        "relation_reclaimed_bytes": max(0, before["table_bytes"] - after["table_bytes"]),
+    }
 
 
 def save_state(value: dict) -> None:
@@ -146,9 +201,25 @@ def require_archived_batch(previous: dict) -> None:
 def resume_reclaim(previous: dict, inspect: dict, rewrite_reserve: int) -> int:
     table = previous["table"]
     require_archived_batch(previous)
+    observed = postgres_relation(table)
+    if str(previous.get("reason", "")).startswith("source reclaim failed: transport"):
+        failed_at = datetime.fromisoformat(previous["updated_at"])
+        analyzed_at = datetime.fromisoformat(observed["last_analyze"])
+        if analyzed_at > failed_at:
+            after = disk_state()
+            state = "recovered" if recovered(after, rewrite_reserve) else "partial"
+            save_state({"state": state, "pressure_active": state == "partial",
+                        "source_deleted_rows": 0, "disk": after,
+                        "reconciled_batch_id": previous["batch_id"],
+                        "reconciled_after_transport": True})
+            return 0
     table_bytes = inspect["table_bytes"][table]
     require_reclaim_reserve(table_bytes)
     before = disk_state()
+    save_state({**previous, "state": "reclaim_pending", "requires_attention": True,
+                "reason": "verified archive reclaim is in progress",
+                "table_before_bytes": observed["table_bytes"],
+                "disk_before_free": before["free"]})
     result = source({
         "action": "reclaim",
         "expected_source": inspect["source"],
