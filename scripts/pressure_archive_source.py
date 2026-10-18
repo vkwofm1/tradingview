@@ -110,6 +110,7 @@ def dispatch(conn, request: dict) -> dict:
         if before > int(request["max_table_bytes"]):
             raise RuntimeError("table grew beyond reserved rewrite budget")
         # Identifier is allowlisted; no CASCADE, whole-table deletion or unbounded lock.
+        conn.execute("SET statement_timeout='15min'")
         conn.execute(f"VACUUM (FULL, ANALYZE) {table}")
         after = capacity(conn)["table_bytes"][table]
         return {"table_before_bytes": before, "table_after_bytes": after,

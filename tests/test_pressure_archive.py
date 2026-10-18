@@ -170,6 +170,28 @@ def test_reclaim_timeout_latches_and_stops(pipeline, monkeypatch, tmp_path):
     assert pressure.run(execute=True) == 1
 
 
+def test_reclaim_timeout_resumes_only_verified_batch(pipeline, monkeypatch, tmp_path):
+    events, original = pipeline
+
+    def timeout(request):
+        if request["action"] == "reclaim":
+            raise RuntimeError("source reclaim failed: QueryCanceled SQLSTATE=57014")
+        return original(request)
+
+    monkeypatch.setattr(pressure, "source", timeout)
+    with pytest.raises(RuntimeError, match="57014"):
+        pressure.run(execute=True)
+    monkeypatch.setattr(pressure, "source", original)
+    monkeypatch.setattr(pressure, "require_archived_batch", lambda value: events.append("archive_reverified"))
+    monkeypatch.setattr(pressure, "require_reclaim_reserve", lambda *_: None)
+
+    assert pressure.run(execute=True, retry=True) == 0
+    assert events.count("delete") == 1
+    assert events[-2:] == ["archive_reverified", "reclaim"]
+    state = json.loads((tmp_path / "pressure-status.json").read_text())
+    assert state["state"] == "recovered" and not state.get("requires_attention")
+
+
 def test_source_correction_stops_further_cleanup(pipeline, monkeypatch):
     events, original = pipeline
     def source(request):

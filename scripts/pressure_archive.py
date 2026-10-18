@@ -27,6 +27,7 @@ FIELDS = {
     "market_data": "id,job_id,collector,symbol,payload,collected_at",
 }
 MAX_BATCHES = 25
+RECLAIM_TIMEOUT_SECONDS = 20 * 60
 
 
 def canonical(value: object) -> bytes:
@@ -48,10 +49,11 @@ def recovered(state: dict, rewrite_reserve: int = 0) -> bool:
 
 
 def source(request: dict) -> dict:
+    timeout = RECLAIM_TIMEOUT_SECONDS if request.get("action") == "reclaim" else 55
     result = subprocess.run([
-        "kubectl", "--context", CONTEXT, "--request-timeout=50s", "exec", "-i", "-n", "default",
+        "kubectl", "--context", CONTEXT, f"--request-timeout={timeout - 5}s", "exec", "-i", "-n", "default",
         "deployment/tradingview", "--", "python", "-c", SOURCE_WORKER.read_text(),
-    ], input=canonical(request), capture_output=True, timeout=55)
+    ], input=canonical(request), capture_output=True, timeout=timeout)
     if result.returncode:
         # Do not expose environment values or payloads in exception traces.
         try:
@@ -108,6 +110,62 @@ def require_reserves(table_bytes: int) -> None:
     archive.require_archive_volume()
     if disk_state(archive.ROOT)["free"] < 50 * GIB:
         raise RuntimeError("D free space below 50GiB reserve; source preserved")
+
+
+def require_reclaim_reserve(table_bytes: int) -> None:
+    """A verified, already-deleted batch only needs one bounded source rewrite."""
+    reserve = int(table_bytes * 1.1) + 10 * GIB
+    if disk_state()["free"] < reserve:
+        raise RuntimeError("insufficient WSL rewrite reserve; archived source remains preserved")
+    archive.require_archive_volume()
+
+
+def require_archived_batch(previous: dict) -> None:
+    batch_id = previous.get("batch_id")
+    table = previous.get("table")
+    digest = previous.get("sha256")
+    if not isinstance(batch_id, str) or table not in TABLES or not isinstance(digest, str):
+        raise RuntimeError("reclaim retry lacks a verified archive identity")
+    value = json.loads(archive.psql(
+        "SELECT json_build_object('manifest',manifest,'snapshot',snapshot) "
+        "FROM archive_meta.pressure_batches WHERE batch_id=" + archive.literal(batch_id),
+        archive.DATABASE,
+        "archive_reader",
+    ))
+    manifest = value.get("manifest", {}) if isinstance(value, dict) else {}
+    snapshot = value.get("snapshot") if isinstance(value, dict) else None
+    if (
+        not isinstance(snapshot, dict)
+        or manifest.get("sha256") != digest
+        or manifest.get("table") != table
+        or hashlib.sha256(canonical(snapshot)).hexdigest() != digest
+    ):
+        raise RuntimeError("reclaim retry archive verification failed; source preserved")
+
+
+def resume_reclaim(previous: dict, inspect: dict, rewrite_reserve: int) -> int:
+    table = previous["table"]
+    require_archived_batch(previous)
+    table_bytes = inspect["table_bytes"][table]
+    require_reclaim_reserve(table_bytes)
+    before = disk_state()
+    result = source({
+        "action": "reclaim",
+        "expected_source": inspect["source"],
+        "table": table,
+        "max_table_bytes": int(table_bytes * 1.1) + GIB,
+    })
+    after = disk_state()
+    archive.report("reclaimed_retry", table=table, disk_before=before, disk_after=after, **result)
+    if result["relation_reclaimed_bytes"] <= 0 or after["free"] <= before["free"]:
+        raise RuntimeError("no measurable physical space reclaimed; further cleanup stopped")
+    if recovered(after, rewrite_reserve):
+        save_state({"state": "recovered", "source_deleted_rows": 0, "disk": after})
+    else:
+        save_state({"state": "partial", "pressure_active": True,
+                    "source_deleted_rows": 0, "disk": after,
+                    "reconciled_batch_id": previous["batch_id"]})
+    return 0
 
 
 def initialize_sink(expected: dict) -> None:
@@ -214,6 +272,18 @@ def run(*, execute: bool, retry: bool = False) -> int:
     rewrite_reserve = max(budgets.values()) * 2 + 20 * GIB
     thresholds = {"trigger_free_bytes": max(60 * GIB, rewrite_reserve + 20 * GIB),
                   "recover_free_bytes": max(80 * GIB, rewrite_reserve + 40 * GIB)}
+    if (
+        execute
+        and retry
+        and previous.get("requires_attention")
+        and (
+            str(previous.get("reason", "")).startswith("source reclaim failed:")
+            or previous.get("reason") == "interrupted batch must be reconciled before retry"
+        )
+    ):
+        require_backing_filesystem(expected)
+        initialize_sink(expected)
+        return resume_reclaim(previous, inspect, rewrite_reserve)
     needs_work = pressured(current, rewrite_reserve) or (
         previous.get("pressure_active", False) and not recovered(current, rewrite_reserve)
     )
