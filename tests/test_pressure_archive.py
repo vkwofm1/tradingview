@@ -216,6 +216,32 @@ def test_reclaim_timeout_resumes_only_verified_batch(pipeline, monkeypatch, tmp_
     assert state["state"] == "recovered" and not state.get("requires_attention")
 
 
+def test_archive_sql_failure_retries_verified_batch_before_new_deletion(
+    pipeline, monkeypatch, tmp_path
+):
+    events, original = pipeline
+    (tmp_path / "pressure-status.json").write_text(
+        json.dumps(
+            {
+                "state": "failed",
+                "requires_attention": True,
+                "reason": "archive SQL failed: transient interop",
+                "batch_id": "pressure_test",
+                "sha256": "a" * 64,
+                "table": "market_candles",
+                "updated_at": "2026-10-19T00:00:00+00:00",
+            }
+        )
+    )
+    monkeypatch.setattr(pressure, "require_archived_batch", lambda value: events.append("archive_reverified"))
+    monkeypatch.setattr(pressure, "require_reclaim_reserve", lambda *_: None)
+    monkeypatch.setattr(pressure, "postgres_relation", lambda *_: {"table_bytes": pressure.GIB})
+
+    assert pressure.run(execute=True, retry=True) == 0
+    assert "prepare" not in events and "delete" not in events
+    assert events[-2:] == ["archive_reverified", "reclaim"]
+
+
 def test_source_correction_stops_further_cleanup(pipeline, monkeypatch):
     events, original = pipeline
     def source(request):
