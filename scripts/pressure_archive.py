@@ -228,7 +228,9 @@ def resume_reclaim(previous: dict, inspect: dict, rewrite_reserve: int) -> int:
     })
     after = disk_state()
     archive.report("reclaimed_retry", table=table, disk_before=before, disk_after=after, **result)
-    if result["relation_reclaimed_bytes"] <= 0 or after["free"] <= before["free"]:
+    # Relation shrink is the direct evidence that VACUUM FULL returned source bytes.
+    # Whole-filesystem free space can still fall while unrelated collectors write concurrently.
+    if result["relation_reclaimed_bytes"] <= 0:
         raise RuntimeError("no measurable physical space reclaimed; further cleanup stopped")
     if recovered(after, rewrite_reserve):
         save_state({"state": "recovered", "source_deleted_rows": 0, "disk": after})
@@ -403,7 +405,7 @@ def run(*, execute: bool, retry: bool = False) -> int:
                              "table": table, "max_table_bytes": budgets[table]})
             after = disk_state()
             archive.report("reclaimed", table=table, disk_before=before, disk_after=after, **result)
-            if result["relation_reclaimed_bytes"] <= 0 or after["free"] <= before["free"]:
+            if result["relation_reclaimed_bytes"] <= 0:
                 raise RuntimeError("no measurable physical space reclaimed; further cleanup stopped")
             if "table_after_bytes" in result:
                 budgets[table] = int(result["table_after_bytes"] * 1.1) + GIB
