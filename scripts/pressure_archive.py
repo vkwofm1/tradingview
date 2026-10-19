@@ -351,6 +351,7 @@ def run(*, execute: bool, retry: bool = False) -> int:
         and previous.get("requires_attention")
         and (
             str(previous.get("reason", "")).startswith("source reclaim failed:")
+            or str(previous.get("reason", "")).startswith("archive SQL failed:")
             or previous.get("reason") == "interrupted batch must be reconciled before retry"
         )
     ):
