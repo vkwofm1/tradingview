@@ -245,6 +245,34 @@ def test_verified_partial_progress_continues_on_next_tick(pipeline, monkeypatch,
     assert not state.get("requires_attention")
 
 
+def test_relation_shrink_is_not_failed_when_concurrent_writes_reduce_disk_free(
+    pipeline, monkeypatch, tmp_path
+):
+    _, original = pipeline
+    states = iter((space(55, .87), space(54, .88)))
+    latest = space(54, .88)
+
+    def disk(*_):
+        nonlocal latest
+        try:
+            latest = next(states)
+        except StopIteration:
+            pass
+        return dict(latest)
+
+    def source(request):
+        if request["action"] == "reclaim":
+            return {"relation_reclaimed_bytes": pressure.GIB}
+        return original(request)
+
+    monkeypatch.setattr(pressure, "disk_state", disk)
+    monkeypatch.setattr(pressure, "source", source)
+    assert pressure.run(execute=True) == 0
+    state = json.loads((tmp_path / "pressure-status.json").read_text())
+    assert state["state"] == "partial" and state["pressure_active"]
+    assert not state.get("requires_attention")
+
+
 def test_no_eligible_history_stops_instead_of_relaxing_protection(pipeline, monkeypatch, tmp_path):
     events, original = pipeline
     def source(request):
