@@ -73,7 +73,7 @@ def capacity(conn) -> dict:
 
 def dispatch(conn, request: dict) -> dict:
     conn.execute("SET TIME ZONE 'UTC'")
-    conn.execute("SET statement_timeout='30s'")
+    conn.execute("SET statement_timeout='45s'")
     conn.execute("SET lock_timeout='1s'")
     conn.execute("SET temp_file_limit='256MB'")
     actual = identity(conn)
