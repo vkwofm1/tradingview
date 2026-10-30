@@ -363,6 +363,38 @@ def insert_market_data(job_id: str, collector: str, symbol: str, payload: Any) -
         )
 
 
+def insert_market_data_rows(
+    job_id: str,
+    collector: str,
+    rows: list[tuple[str, Any]],
+) -> int:
+    """Insert one collector snapshot in a single transaction."""
+    if not rows:
+        return 0
+    now = datetime.now(timezone.utc).isoformat()
+    values = [
+        (job_id, collector, symbol, json.dumps(payload), now)
+        for symbol, payload in rows
+    ]
+    sql = (
+        "INSERT INTO market_data "
+        "(job_id, collector, symbol, payload, collected_at) VALUES (?,?,?,?,?)"
+    )
+    connection = _get_postgres_conn() if is_postgres() else _get_sqlite_conn()
+    if is_postgres():
+        sql = sql.replace("?", "%s")
+    cursor = connection.cursor()
+    try:
+        cursor.executemany(sql, values)
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        raise
+    finally:
+        cursor.close()
+    return len(values)
+
+
 def insert_market_candle(
     job_id: str,
     collector: str,

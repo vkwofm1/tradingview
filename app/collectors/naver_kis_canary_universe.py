@@ -632,7 +632,8 @@ async def collect(job_id: str, symbols: list[str] | None = None) -> int:
         ) from exc
 
     prepared = _prepare_universe(raw_rows, top_n)
-    for payload in prepared:
-        code = str(payload["code"])
-        db.insert_market_data(job_id, COLLECTOR_NAME, code, payload)
-    return len(prepared)
+    return db.insert_market_data_rows(
+        job_id,
+        COLLECTOR_NAME,
+        [(str(payload["code"]), payload) for payload in prepared],
+    )

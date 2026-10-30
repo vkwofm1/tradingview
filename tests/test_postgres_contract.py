@@ -115,6 +115,40 @@ def test_stock_postgres_publish_rolls_back_on_error(monkeypatch):
     assert connection.commits == 0
 
 
+def test_market_data_rows_use_one_postgres_transaction(monkeypatch):
+    connection = _Connection()
+    monkeypatch.setattr(db, "DB_TYPE", "postgres")
+    monkeypatch.setattr(db, "_get_postgres_conn", lambda: connection)
+
+    count = db.insert_market_data_rows(
+        "job",
+        "naver_kis_canary_universe",
+        [("005930", {"price": 100}), ("035720", {"price": 200})],
+    )
+
+    assert count == 2
+    assert connection.commits == 1
+    assert connection.rollbacks == 0
+    assert len(connection.statements) == 2
+    assert all("?" not in sql for sql, _params in connection.statements)
+
+
+def test_market_data_rows_roll_back_the_whole_postgres_batch(monkeypatch):
+    connection = _Connection(fail=True)
+    monkeypatch.setattr(db, "DB_TYPE", "postgres")
+    monkeypatch.setattr(db, "_get_postgres_conn", lambda: connection)
+
+    with pytest.raises(RuntimeError, match="database write failed"):
+        db.insert_market_data_rows(
+            "job",
+            "naver_kis_canary_universe",
+            [("005930", {"price": 100}), ("035720", {"price": 200})],
+        )
+
+    assert connection.commits == 0
+    assert connection.rollbacks == 1
+
+
 def test_postgres_execute_rolls_back_failed_transaction(monkeypatch):
     connection = _Connection(fail=True)
     monkeypatch.setattr(db, "_get_postgres_conn", lambda: connection)

@@ -83,6 +83,18 @@ def _mock_market_page(
 async def test_collects_both_markets_with_bounded_pagination_filters_and_ranks(
     monkeypatch,
 ):
+    batches = []
+    insert_rows = db.insert_market_data_rows
+
+    def record_rows(job_id, collector_name, rows):
+        batches.append((job_id, collector_name, rows))
+        return insert_rows(job_id, collector_name, rows)
+
+    def reject_single_insert(*_args, **_kwargs):
+        pytest.fail("canary universe must use one bulk insert")
+
+    monkeypatch.setattr(db, "insert_market_data_rows", record_rows)
+    monkeypatch.setattr(db, "insert_market_data", reject_single_insert)
     monkeypatch.setenv("NAVER_KIS_CANARY_UNIVERSE_TOP_N", "10")
     kospi_first_page = [
         _stock("005930", price="9,900", volume="100", name="eligible-low-price")
@@ -122,6 +134,9 @@ async def test_collects_both_markets_with_bounded_pagination_filters_and_ranks(
 
     assert job["status"] == "completed"
     assert job["result_count"] == 5
+    assert len(batches) == 1
+    assert batches[0][1] == collector.COLLECTOR_NAME
+    assert len(batches[0][2]) == 5
     rows = db.query_market_data(collector.COLLECTOR_NAME, limit=20)
     by_code = {row["symbol"]: row["payload"] for row in rows}
     assert set(by_code) == {"123450", "035720", "000660", "035420", "005930"}
