@@ -77,6 +77,37 @@ def test_worker_rejects_arbitrary_table():
         worker.delete_sql("jobs; DROP DATABASE tradingview")
 
 
+def test_prepare_timeout_retries_once_with_bounded_smaller_batch(monkeypatch):
+    calls = []
+
+    def source(request):
+        calls.append(request)
+        if len(calls) == 1:
+            raise RuntimeError("source prepare failed: QueryCanceled SQLSTATE=57014")
+        return {"rows": [], "jobs": []}
+
+    monkeypatch.setattr(pressure, "source", source)
+    assert pressure.prepare_batch({"system_id": "1"}, "market_candles") == {
+        "rows": [],
+        "jobs": [],
+    }
+    assert "limit" not in calls[0]
+    assert calls[1]["limit"] == pressure.PREPARE_FALLBACK_LIMIT
+
+
+def test_prepare_non_timeout_failure_is_not_retried(monkeypatch):
+    calls = []
+
+    def source(request):
+        calls.append(request)
+        raise RuntimeError("source prepare failed: OperationalError SQLSTATE=08006")
+
+    monkeypatch.setattr(pressure, "source", source)
+    with pytest.raises(RuntimeError, match="08006"):
+        pressure.prepare_batch({"system_id": "1"}, "market_candles")
+    assert len(calls) == 1
+
+
 def test_reclaim_targets_postgres_pod_not_restartable_app(monkeypatch):
     calls = []
 

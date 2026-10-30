@@ -27,6 +27,7 @@ FIELDS = {
     "market_data": "id,job_id,collector,symbol,payload,collected_at",
 }
 MAX_BATCHES = 25
+PREPARE_FALLBACK_LIMIT = 500
 RECLAIM_TIMEOUT_SECONDS = 20 * 60
 
 
@@ -65,6 +66,16 @@ def source(request: dict) -> dict:
         raise RuntimeError(f"source {request['action']} failed: {error.get('error_type', 'transport')} "
                            f"SQLSTATE={error.get('sqlstate')}; no further source cleanup")
     return json.loads(result.stdout)
+
+
+def prepare_batch(expected: dict, table: str) -> dict:
+    request = {"action": "prepare", "expected_source": expected, "table": table}
+    try:
+        return source(request)
+    except RuntimeError as exc:
+        if "QueryCanceled SQLSTATE=57014" not in str(exc):
+            raise
+    return source({**request, "limit": PREPARE_FALLBACK_LIMIT})
 
 
 def postgres_relation(table: str) -> dict:
@@ -380,7 +391,7 @@ def run(*, execute: bool, retry: bool = False) -> int:
             if recovered(disk_state(), rewrite_reserve):
                 break
             require_reserves(budgets[table])
-            batch = source({"action": "prepare", "expected_source": expected, "table": table})
+            batch = prepare_batch(expected, table)
             if not batch["rows"]:
                 break
             batch_id, digest = persist_and_verify(batch)
