@@ -5,9 +5,51 @@ import hashlib
 import json
 import os
 import sys
+from contextlib import contextmanager
 
 TABLES = ("market_data", "market_candles")
 GIB = 1024**3
+
+
+class Psycopg2Connection:
+    """Expose the small psycopg3 API subset used by this bounded worker."""
+
+    def __init__(self, connection):
+        self.connection = connection
+        self.connection.autocommit = True
+
+    def execute(self, query, params=None):
+        cursor = self.connection.cursor()
+        cursor.execute(query, params)
+        return cursor
+
+    @contextmanager
+    def transaction(self):
+        self.connection.autocommit = False
+        try:
+            yield
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
+        finally:
+            self.connection.autocommit = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.connection.close()
+
+
+def connect_database(url: str):
+    try:
+        import psycopg
+    except ImportError:
+        import psycopg2
+
+        return Psycopg2Connection(psycopg2.connect(url))
+    return psycopg.connect(url, autocommit=True)
 
 
 def validate_table(table: str) -> str:
@@ -121,15 +163,14 @@ def dispatch(conn, request: dict) -> dict:
 
 
 def main() -> None:
-    import psycopg
-
     request = json.load(sys.stdin)
     try:
-        with psycopg.connect(os.environ["DATABASE_URL"], autocommit=True) as conn:
+        with connect_database(os.environ["DATABASE_URL"]) as conn:
             print(json.dumps(dispatch(conn, request)), flush=True)
     except Exception as exc:
         print(json.dumps({"error_type": type(exc).__name__,
-                          "sqlstate": getattr(exc, "sqlstate", None)}), flush=True)
+                          "sqlstate": getattr(exc, "sqlstate", getattr(exc, "pgcode", None))}),
+              flush=True)
         sys.exit(1)
 
 

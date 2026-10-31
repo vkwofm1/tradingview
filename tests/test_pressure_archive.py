@@ -77,6 +77,59 @@ def test_worker_rejects_arbitrary_table():
         worker.delete_sql("jobs; DROP DATABASE tradingview")
 
 
+def test_psycopg2_adapter_commits_and_restores_autocommit():
+    events = []
+
+    class RawConnection:
+        autocommit = None
+
+        def cursor(self):
+            return self
+
+        def execute(self, query, params=None):
+            events.append((query, params))
+            return self
+
+        def commit(self):
+            events.append("commit")
+
+        def rollback(self):
+            events.append("rollback")
+
+        def close(self):
+            events.append("close")
+
+    raw = RawConnection()
+    with worker.Psycopg2Connection(raw) as connection:
+        assert raw.autocommit is True
+        with connection.transaction():
+            assert raw.autocommit is False
+            connection.execute("SELECT %s", (1,))
+        assert raw.autocommit is True
+    assert events == [("SELECT %s", (1,)), "commit", "close"]
+
+
+def test_psycopg2_adapter_rolls_back_and_restores_autocommit():
+    events = []
+
+    class RawConnection:
+        autocommit = None
+
+        def rollback(self):
+            events.append("rollback")
+
+        def close(self):
+            events.append("close")
+
+    raw = RawConnection()
+    with pytest.raises(RuntimeError, match="stop"):
+        with worker.Psycopg2Connection(raw) as connection:
+            with connection.transaction():
+                raise RuntimeError("stop")
+    assert raw.autocommit is True
+    assert events == ["rollback", "close"]
+
+
 def test_prepare_timeout_retries_once_with_bounded_smaller_batch(monkeypatch):
     calls = []
 
