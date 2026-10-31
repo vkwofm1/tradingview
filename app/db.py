@@ -16,6 +16,26 @@ POSTGRES_URL = os.environ.get("DATABASE_URL", "").strip()
 
 _local = threading.local()
 KST = ZoneInfo("Asia/Seoul")
+POSTGRES_SCHEMA_TABLES = {
+    "jobs",
+    "market_data",
+    "market_candles",
+    "collector_symbol_state",
+    "collection_policies",
+}
+POSTGRES_SCHEMA_INDEXES = {
+    "idx_jobs_collector_status_created",
+    "idx_md_symbol",
+    "idx_md_collector",
+    "idx_md_collector_job_id",
+    "idx_md_collector_symbol_time",
+    "idx_mc_symbol",
+    "idx_mc_collector",
+    "idx_mc_time",
+    "idx_mc_collector_symbol_time",
+    "idx_mc_job_collector_interval",
+}
+POSTGRES_SCHEMA_LOCK_ID = 8_507_135_009
 NAIVE_CANDLE_TIMEZONES = {
     "upbit": KST,
     "upbit_1m": KST,
@@ -188,6 +208,21 @@ def _init_postgres_db() -> None:
     conn = _get_postgres_conn()
     cursor = conn.cursor()
 
+    if _postgres_schema_ready(cursor):
+        conn.commit()
+        cursor.close()
+        return
+
+    # Bootstrap is exceptional. Normal API and collector starts must never
+    # queue DDL behind REINDEX/VACUUM or another initializer.
+    cursor.execute("SET LOCAL lock_timeout = '5s'")
+    cursor.execute("SET LOCAL statement_timeout = '30s'")
+    cursor.execute("SELECT pg_advisory_xact_lock(%s)", (POSTGRES_SCHEMA_LOCK_ID,))
+    if _postgres_schema_ready(cursor):
+        conn.commit()
+        cursor.close()
+        return
+
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS jobs (
             id          VARCHAR(255) PRIMARY KEY,
@@ -279,6 +314,37 @@ def _init_postgres_db() -> None:
 
     conn.commit()
     cursor.close()
+
+
+def _postgres_schema_ready(cursor: Any) -> bool:
+    cursor.execute(
+        """
+        SELECT
+            (SELECT count(*) = %s
+             FROM pg_catalog.pg_class
+             WHERE relnamespace = 'public'::regnamespace
+               AND relkind IN ('r', 'p')
+               AND relname = ANY(%s))
+            AND
+            (SELECT count(*) = %s
+             FROM pg_catalog.pg_index AS i
+             JOIN pg_catalog.pg_class AS idx ON idx.oid = i.indexrelid
+             WHERE idx.relnamespace = 'public'::regnamespace
+               AND idx.relname = ANY(%s)
+               AND i.indisvalid
+               AND i.indisready) AS ready
+        """,
+        (
+            len(POSTGRES_SCHEMA_TABLES),
+            sorted(POSTGRES_SCHEMA_TABLES),
+            len(POSTGRES_SCHEMA_INDEXES),
+            sorted(POSTGRES_SCHEMA_INDEXES),
+        ),
+    )
+    row = cursor.fetchone()
+    if isinstance(row, dict):
+        return row.get("ready") is True
+    return bool(row and row[0] is True)
 
 
 def create_job(job_id: str, collector: str) -> dict:

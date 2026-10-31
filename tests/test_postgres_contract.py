@@ -21,6 +21,8 @@ class _Cursor:
             raise RuntimeError("database write failed")
 
     def fetchone(self):
+        if self.connection.fetchone_values:
+            return self.connection.fetchone_values.pop(0)
         return {"ok": True}
 
     def executemany(self, sql, rows):
@@ -35,8 +37,9 @@ class _Cursor:
 
 
 class _Connection:
-    def __init__(self, *, fail=False):
+    def __init__(self, *, fail=False, fetchone_values=None):
         self.fail = fail
+        self.fetchone_values = list(fetchone_values or [])
         self.statements = []
         self.commits = 0
         self.rollbacks = 0
@@ -52,7 +55,7 @@ class _Connection:
 
 
 def test_postgres_schema_uses_timezone_aware_timestamps(monkeypatch):
-    connection = _Connection()
+    connection = _Connection(fetchone_values=[{"ready": False}, {"ready": False}])
     monkeypatch.setattr(db, "_get_postgres_conn", lambda: connection)
 
     db._init_postgres_db()
@@ -72,6 +75,33 @@ def test_postgres_schema_uses_timezone_aware_timestamps(monkeypatch):
     assert "market_candles(collector, symbol, candle_time)" in schema
     assert "idx_jobs_collector_status_created" in schema
     assert "jobs(collector, status, created_at DESC)" in schema
+    assert connection.commits == 1
+
+
+def test_postgres_schema_ready_start_never_runs_ddl(monkeypatch):
+    connection = _Connection(fetchone_values=[{"ready": True}])
+    monkeypatch.setattr(db, "_get_postgres_conn", lambda: connection)
+
+    db._init_postgres_db()
+
+    statements = [sql for sql, _params in connection.statements]
+    assert len(statements) == 1
+    assert "pg_catalog.pg_index" in statements[0]
+    assert not any("CREATE " in sql for sql in statements)
+    assert connection.commits == 1
+
+
+def test_postgres_concurrent_initializer_rechecks_after_bounded_lock(monkeypatch):
+    connection = _Connection(fetchone_values=[{"ready": False}, {"ready": True}])
+    monkeypatch.setattr(db, "_get_postgres_conn", lambda: connection)
+
+    db._init_postgres_db()
+
+    statements = [sql for sql, _params in connection.statements]
+    assert "SET LOCAL lock_timeout = '5s'" in statements
+    assert "SET LOCAL statement_timeout = '30s'" in statements
+    assert any("pg_advisory_xact_lock" in sql for sql in statements)
+    assert not any("CREATE " in sql for sql in statements)
     assert connection.commits == 1
 
 
