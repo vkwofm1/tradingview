@@ -28,7 +28,7 @@ FIELDS = {
 }
 MAX_BATCHES = 25
 PREPARE_FALLBACK_LIMIT = 500
-RECLAIM_TIMEOUT_SECONDS = 20 * 60
+RECLAIM_TIMEOUT_SECONDS = 35 * 60
 
 
 def canonical(value: object) -> bytes:
@@ -111,7 +111,7 @@ def reclaim_source(request: dict) -> dict:
     if before["table_bytes"] > int(request["max_table_bytes"]):
         raise RuntimeError("table grew beyond reserved rewrite budget")
     options = (
-        "-c statement_timeout=900000 -c lock_timeout=1000 -c temp_file_limit=8388608 "
+        "-c statement_timeout=1800000 -c lock_timeout=1000 -c temp_file_limit=8388608 "
         "-c max_parallel_maintenance_workers=0"
     )
     result = subprocess.run([
@@ -122,7 +122,15 @@ def reclaim_source(request: dict) -> dict:
         "archive-reclaim", options, f"VACUUM (FULL, ANALYZE) {table}",
     ], capture_output=True, text=True, timeout=RECLAIM_TIMEOUT_SECONDS)
     if result.returncode:
-        raise RuntimeError("source reclaim failed: transport SQLSTATE=None; no further source cleanup")
+        # 고정 오류 분류만 보존하며 원문 stderr/접속 정보는 기록하지 않는다.
+        diagnostic = result.stderr.casefold()
+        if "statement timeout" in diagnostic:
+            error = "QueryCanceled SQLSTATE=57014"
+        elif "lock timeout" in diagnostic:
+            error = "LockNotAvailable SQLSTATE=55P03"
+        else:
+            error = "transport SQLSTATE=None"
+        raise RuntimeError(f"source reclaim failed: {error}; no further source cleanup")
     after = postgres_relation(table)
     return {
         "table_before_bytes": before["table_bytes"],
@@ -213,7 +221,10 @@ def resume_reclaim(previous: dict, inspect: dict, rewrite_reserve: int) -> int:
     table = previous["table"]
     require_archived_batch(previous)
     observed = postgres_relation(table)
-    if str(previous.get("reason", "")).startswith("source reclaim failed: transport"):
+    if (
+        str(previous.get("reason", "")).startswith("source reclaim failed: transport")
+        and observed.get("last_analyze") is not None
+    ):
         failed_at = datetime.fromisoformat(previous["updated_at"])
         analyzed_at = datetime.fromisoformat(observed["last_analyze"])
         if analyzed_at > failed_at:

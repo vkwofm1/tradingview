@@ -488,3 +488,39 @@ def test_native_selection_corrections_archive_readback_and_reclaim(monkeypatch):
         archive.psql(f'DROP DATABASE "{database}";')
         for path in owned_files:
             path.unlink()
+
+
+def test_transport_retry_without_analyze_timestamp_reclaims_verified_batch(monkeypatch, tmp_path):
+    monkeypatch.setattr(pressure, "STATE", tmp_path)
+    calls = []
+    monkeypatch.setattr(pressure, "require_archived_batch", lambda _: calls.append("verify"))
+    monkeypatch.setattr(pressure, "postgres_relation", lambda _: {"table_bytes": 30, "last_analyze": None})
+    monkeypatch.setattr(pressure, "require_reclaim_reserve", lambda _: None)
+    monkeypatch.setattr(pressure, "disk_state", lambda: space())
+    def source(request):
+        assert request["action"] == "reclaim"
+        calls.append("reclaim")
+        return {"relation_reclaimed_bytes": 10, "table_after_bytes": 20}
+    monkeypatch.setattr(pressure, "source", source)
+    previous = {"table": "market_candles", "reason": "source reclaim failed: transport SQLSTATE=None",
+                "updated_at": "2026-11-01T22:22:16+00:00", "batch_id": "verified", "sha256": "a" * 64}
+    assert pressure.resume_reclaim(previous, {"table_bytes": {"market_candles": 30}, "source": {}}, 0) == 0
+    assert calls == ["verify", "reclaim"]
+    state = json.loads((tmp_path / "pressure-status.json").read_text())
+    assert state["state"] == "recovered" and state["source_deleted_rows"] == 0
+
+
+@pytest.mark.parametrize("message,code", [("canceling statement due to statement timeout", "57014"),
+                                           ("canceling statement due to lock timeout", "55P03")])
+def test_reclaim_failure_preserves_timeout_classification_without_raw_stderr(monkeypatch, message, code):
+    import subprocess
+    monkeypatch.setattr(pressure, "postgres_relation", lambda _: {"table_bytes": 30, "system_id": "1", "database": "db"})
+    def run(command, **kwargs):
+        assert kwargs["timeout"] > 30 * 60
+        options = next(value for value in command if "statement_timeout=" in value)
+        assert "statement_timeout=1800000" in options
+        return subprocess.CompletedProcess(command, 1, "", "ERROR: " + message + " secret-value")
+    monkeypatch.setattr(pressure.subprocess, "run", run)
+    with pytest.raises(RuntimeError) as error:
+        pressure.reclaim_source({"table": "market_candles", "expected_source": {"system_id": "1", "database": "db"}, "max_table_bytes": 40})
+    assert code in str(error.value) and "secret-value" not in str(error.value)
