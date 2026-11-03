@@ -430,6 +430,11 @@ def run(*, execute: bool, retry: bool = False) -> int:
             archive.report("reclaimed", table=table, disk_before=before, disk_after=after, **result)
             if result["relation_reclaimed_bytes"] <= 0:
                 raise RuntimeError("no measurable physical space reclaimed; further cleanup stopped")
+            # 다음 테이블의 조회 실패가 완료된 삭제·공간 회수를 미확정으로 되돌리지 않는다.
+            save_state({"state": "partial", "pressure_active": True,
+                        "source_deleted_rows": total_deleted, "disk": after,
+                        "reconciled_batch_id": batch_id, "reclaimed_table": table,
+                        "relation_reclaimed_bytes": result["relation_reclaimed_bytes"]})
             if "table_after_bytes" in result:
                 budgets[table] = int(result["table_after_bytes"] * 1.1) + GIB
                 rewrite_reserve = max(budgets.values()) * 2 + 20 * GIB

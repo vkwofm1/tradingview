@@ -355,6 +355,23 @@ def test_verified_partial_progress_continues_on_next_tick(pipeline, monkeypatch,
     assert not state.get("requires_attention")
 
 
+def test_next_table_probe_failure_preserves_completed_reclaim(pipeline, monkeypatch, tmp_path):
+    _, original = pipeline
+    monkeypatch.setattr(pressure, "disk_state", lambda *_: space(55, .87))
+    def source(request):
+        if request["action"] == "prepare" and request["table"] == "market_data":
+            raise RuntimeError("source prepare failed: transport")
+        return original(request)
+    monkeypatch.setattr(pressure, "source", source)
+    with pytest.raises(RuntimeError, match="prepare failed"):
+        pressure.run(execute=True)
+    state = json.loads((tmp_path / "pressure-status.json").read_text())
+    assert state["state"] == "partial"
+    assert state["reclaimed_table"] == "market_candles"
+    assert state["source_deleted_rows"] == 1
+    assert not state.get("requires_attention")
+
+
 def test_relation_shrink_is_not_failed_when_concurrent_writes_reduce_disk_free(
     pipeline, monkeypatch, tmp_path
 ):

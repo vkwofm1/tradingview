@@ -29,6 +29,7 @@ POSTGRES_SCHEMA_INDEXES = {
     "idx_md_collector",
     "idx_md_collector_job_id",
     "idx_md_collector_symbol_time",
+    "idx_md_archive_time_id",
     "idx_mc_symbol",
     "idx_mc_collector",
     "idx_mc_time",
@@ -176,6 +177,8 @@ def _init_sqlite_db() -> None:
             ON market_data(collector, job_id);
         CREATE INDEX IF NOT EXISTS idx_md_collector_symbol_time
             ON market_data(collector, symbol, collected_at);
+        CREATE INDEX IF NOT EXISTS idx_md_archive_time_id
+            ON market_data(collected_at, id);
         CREATE INDEX IF NOT EXISTS idx_mc_symbol ON market_candles(symbol);
         CREATE INDEX IF NOT EXISTS idx_mc_collector ON market_candles(collector);
         CREATE INDEX IF NOT EXISTS idx_mc_time ON market_candles(candle_time);
@@ -277,6 +280,10 @@ def _init_postgres_db() -> None:
         "ON market_data(collector, symbol, collected_at)"
     )
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mc_symbol ON market_candles(symbol)")
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_md_archive_time_id "
+        "ON market_data(collected_at, id)"
+    )
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mc_collector ON market_candles(collector)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mc_time ON market_candles(candle_time)")
     cursor.execute(
