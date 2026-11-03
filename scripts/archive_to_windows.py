@@ -6,6 +6,7 @@ import argparse
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import fcntl
+from functools import lru_cache
 import hashlib
 import json
 import os
@@ -74,10 +75,34 @@ def report(event: str, **values: object) -> None:
     print(json.dumps({'event': event, **values}, ensure_ascii=False), flush=True)
 
 
+@lru_cache(maxsize=1)
+def windows_environment() -> dict[str, str]:
+    # systemd 사용자 서비스는 로그인 세션의 interop 환경을 상속하지 않는다.
+    # PID 1 링크도 실행 불가능할 수 있으므로 무부작용 명령으로 먼저 확인한다.
+    inherited = os.environ.get('WSL_INTEROP')
+    candidates = ([Path(inherited)] if inherited else []) + sorted(Path('/run/WSL').glob('*_interop'))
+    executable = BIN / 'psql.exe'
+    for socket in dict.fromkeys(candidates):
+        if not socket.is_socket():
+            continue
+        env = {**os.environ, 'WSL_INTEROP': str(socket)}
+        try:
+            probe = subprocess.run(
+                [winpath(executable), '--version'], executable=str(executable),
+                env=env, capture_output=True, timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if probe.returncode == 0:
+            return env
+    raise RuntimeError('no working WSL interop socket; archive operation not started')
+
+
 def windows_run(tool: str, arguments: list[str], **options):
     # argv[0]도 Windows 경로여야 pg_restore가 자신의 실행 파일을 찾는다.
     executable = BIN / tool
-    return subprocess.run([winpath(executable), *arguments], executable=str(executable), **options)
+    return subprocess.run([winpath(executable), *arguments], executable=str(executable),
+                          env=windows_environment(), **options)
 
 
 def psql(query: str, database: str = 'postgres', user: str = 'archive_owner') -> str:
@@ -143,7 +168,8 @@ def stream_dump(command: list[str], destination: Path, executable: str | None = 
     hasher = hashlib.sha256()
     size = 0
     with partial.open('xb') as output:
-        process = subprocess.Popen(command, executable=executable, stdout=subprocess.PIPE)
+        process = subprocess.Popen(command, executable=executable, stdout=subprocess.PIPE,
+                                   env=windows_environment() if executable else None)
         assert process.stdout is not None  # stdout=PIPE 계약을 정적 검사에서도 명확히 한다.
         try:
             while chunk := process.stdout.read(1024 * 1024):

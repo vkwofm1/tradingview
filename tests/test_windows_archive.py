@@ -95,11 +95,48 @@ def test_missing_d_drive_never_falls_back_into_wsl(monkeypatch):
 
 def test_windows_tools_receive_native_argv0(monkeypatch):
     calls = []
+    monkeypatch.setattr(archive, 'windows_environment', lambda: {'WSL_INTEROP': '/working'})
     monkeypatch.setattr(archive.subprocess, 'run', lambda *args, **kwargs: calls.append((args, kwargs)))
     archive.windows_run('pg_restore.exe', ['--list', 'D:/example.dump'], check=True)
     args, options = calls[0]
     assert args[0][0] == 'D:/PostgreSQL/16.15/pgsql/bin/pg_restore.exe'
     assert options['executable'] == str(archive.BIN / 'pg_restore.exe')
+    assert options['env']['WSL_INTEROP'] == '/working'
+
+
+@pytest.mark.parametrize('failure', ['exit', 'timeout', 'oserror'])
+def test_interop_discovers_working_socket_without_replaying_sql(monkeypatch, failure):
+    archive.windows_environment.cache_clear()
+    monkeypatch.setenv('WSL_INTEROP', '/stale')
+    monkeypatch.setattr(Path, 'glob', lambda *_: [Path('/working')])
+    monkeypatch.setattr(Path, 'is_socket', lambda _: True)
+    calls = []
+    def probe(args, **kwargs):
+        assert args[1:] == ['--version']
+        calls.append(kwargs['env']['WSL_INTEROP'])
+        if calls[-1] == '/stale':
+            if failure == 'timeout':
+                raise subprocess.TimeoutExpired(args, 5)
+            if failure == 'oserror':
+                raise OSError('unavailable')
+            return subprocess.CompletedProcess(args, 1)
+        return subprocess.CompletedProcess(args, 0)
+    monkeypatch.setattr(archive.subprocess, 'run', probe)
+    try:
+        assert archive.windows_environment()['WSL_INTEROP'] == '/working'
+        assert archive.windows_environment()['WSL_INTEROP'] == '/working'
+        assert calls == ['/stale', '/working']
+    finally:
+        archive.windows_environment.cache_clear()
+
+
+def test_interop_missing_socket_refuses_archive_operation(monkeypatch):
+    archive.windows_environment.cache_clear()
+    monkeypatch.delenv('WSL_INTEROP', raising=False)
+    monkeypatch.setattr(Path, 'glob', lambda *_: [])
+    monkeypatch.setattr(archive.subprocess, 'run', lambda *_a, **_k: pytest.fail('must not execute SQL'))
+    with pytest.raises(RuntimeError, match='operation not started'):
+        archive.windows_run('psql.exe', ['-c', 'DELETE FROM example'])
 
 
 def test_archive_restore_keeps_all_data_constraints_and_lookup_indexes():
