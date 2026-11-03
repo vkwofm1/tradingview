@@ -280,3 +280,22 @@ def test_postgres_candle_timezone_is_collector_specific(monkeypatch):
         assert "unknown timezone" in str(exc)
     else:
         raise AssertionError("unknown naive candle timezone must fail closed")
+
+
+def test_postgres_connections_bound_maintenance_lock_waits(monkeypatch):
+    import threading
+    import psycopg
+    from types import SimpleNamespace
+
+    calls = []
+    connection = SimpleNamespace(execute=lambda *_: None)
+    def connect(*args, **kwargs):
+        calls.append(kwargs)
+        return connection
+    monkeypatch.setattr(db, "_local", threading.local())
+    monkeypatch.setattr(db, "POSTGRES_URL", "postgresql://test.invalid/test")
+    monkeypatch.setattr(psycopg, "connect", connect)
+    assert db._get_postgres_conn() is connection
+    options = calls[0]["options"]
+    assert "lock_timeout=1000" in options
+    assert "statement_timeout=30000" in options

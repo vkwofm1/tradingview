@@ -233,7 +233,7 @@ def test_collect_creates_job(client, monkeypatch):
         db.insert_market_data(job_id, "crypto", "BTC", {"price": 50000})
         return 1
 
-    monkeypatch.setattr("app.collectors.crypto.collect", fake_collect)
+    monkeypatch.setitem(__import__("app.main", fromlist=["COLLECTORS"]).COLLECTORS, "crypto", fake_collect)
     resp = client.post("/collect", json={"collector": "crypto"})
     assert resp.status_code == 200
     job = resp.json()
@@ -813,3 +813,47 @@ async def test_mcp_tools_listed_and_query():
             rows = json.loads(text)
         assert isinstance(rows, list)
         assert any(r["payload"]["trade_price"] == 12345 for r in rows)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entrypoint", ["runner", "background_rest"])
+async def test_collector_database_wait_does_not_block_health(monkeypatch, entrypoint):
+    import threading
+    from app import main
+
+    entered = threading.Event()
+    release = threading.Event()
+    stalled_event_loop = threading.Event()
+
+    async def blocked_collector(job_id, symbols):
+        entered.set()
+        if not release.wait(1.5):
+            stalled_event_loop.set()
+        return 3
+
+    monkeypatch.setitem(main.COLLECTORS, "blocked_test", blocked_collector)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        task = None
+        if entrypoint == "runner":
+            task = asyncio.create_task(run_collector("blocked_test", blocked_collector))
+        else:
+            response = await client.post("/collect", json={"collector": "blocked_test"})
+            assert response.status_code == 200
+            job_id = response.json()["id"]
+        try:
+            assert await asyncio.to_thread(entered.wait, 1)
+            response = await asyncio.wait_for(client.get("/health"), timeout=0.5)
+            assert response.status_code == 200
+            assert not stalled_event_loop.is_set()
+        finally:
+            release.set()
+            if task is not None:
+                job = await task
+        if task is None:
+            for _ in range(100):
+                job = db.get_job(job_id)
+                if job["status"] == "completed":
+                    break
+                await asyncio.sleep(0.01)
+        assert job["status"] == "completed"
+        assert job["result_count"] == 3

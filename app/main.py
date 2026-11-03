@@ -21,7 +21,7 @@ from app.db_monitoring import get_database_health, get_database_stats, get_migra
 from app.mcp_server import build_mcp
 from app.monitoring import build_operations_dashboard
 from app.news_cache import search_news
-from app.runner import run_collector
+from app.runner import run_collector, run_existing_collector
 from app.scheduler import Scheduler
 from app.adoption_scheduler import AdoptionMetricsScheduler
 
@@ -161,17 +161,10 @@ async def start_collection(req: CollectRequest):
     if req.collector not in COLLECTORS:
         raise HTTPException(400, f"Unknown collector: {req.collector}. Available: {list(COLLECTORS)}")
     job_id = uuid.uuid4().hex[:12]
-    job = db.create_job(job_id, req.collector)
-    resolved_symbols = db.resolve_collection_symbols(req.collector, req.symbols)
-
-    async def _run():
-        try:
-            count = await COLLECTORS[req.collector](job_id, resolved_symbols)
-            db.finish_job(job_id, count)
-        except Exception as exc:
-            db.finish_job(job_id, 0, str(exc))
-
-    asyncio.create_task(_run())
+    job = await asyncio.to_thread(db.create_job, job_id, req.collector)
+    asyncio.create_task(
+        run_existing_collector(job_id, req.collector, COLLECTORS[req.collector], req.symbols)
+    )
     return job
 
 

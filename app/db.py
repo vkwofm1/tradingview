@@ -82,6 +82,8 @@ def _get_postgres_conn():
             row_factory=dict_row,
             connect_timeout=10,
             application_name="tradingview-crawl",
+            # Maintenance locks must fail the job promptly, not pin API workers indefinitely.
+            options="-c lock_timeout=1000 -c statement_timeout=30000",
         )
         _local.postgres_conn.execute("SET TIME ZONE 'UTC'")
     return _local.postgres_conn
