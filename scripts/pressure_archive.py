@@ -26,7 +26,8 @@ FIELDS = {
     "market_candles": "id,job_id,collector,symbol,interval,candle_time,payload,collected_at",
     "market_data": "id,job_id,collector,symbol,payload,collected_at",
 }
-MAX_BATCHES = 25
+# Four daily cycles can process up to 800k rows per table, above observed intake.
+MAX_BATCHES = 100
 PREPARE_FALLBACK_LIMIT = 500
 RECLAIM_TIMEOUT_SECONDS = 35 * 60
 
