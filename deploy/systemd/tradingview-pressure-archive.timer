@@ -1,8 +1,8 @@
 [Unit]
-Description=Check WSL headroom daily; archive only under pressure
+Description=Check WSL headroom every six hours; archive only under pressure
 
 [Timer]
-OnCalendar=*-*-* 07:00:00 Asia/Seoul
+OnCalendar=*-*-* 01,07,13,19:00:00 Asia/Seoul
 Persistent=true
 RandomizedDelaySec=30s
 Unit=tradingview-pressure-archive.service

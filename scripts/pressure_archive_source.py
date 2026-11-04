@@ -117,6 +117,7 @@ def dispatch(conn, request: dict) -> dict:
     conn.execute("SET TIME ZONE 'UTC'")
     conn.execute("SET statement_timeout='45s'")
     conn.execute("SET lock_timeout='1s'")
+    conn.execute("SET jit=off")
     conn.execute("SET temp_file_limit='256MB'")
     actual = identity(conn)
     if request["action"] != "inspect" and "expected_source" not in request:
@@ -132,12 +133,25 @@ def dispatch(conn, request: dict) -> dict:
         if not 1 <= limit <= 2000:
             raise ValueError("invalid batch limit")
         with conn.transaction():
-            rows = [r[0] for r in conn.execute(select_sql(table), (limit,))]
+            after_id = int(request.get("after_id", 0))
+            if after_id < 0:
+                raise ValueError("invalid scan cursor")
+            # Bound work before applying expensive retention checks. Primary-key keyset
+            # pagination also advances past protected rows, without sorting old history.
+            ids = [r[0] for r in conn.execute(
+                f"SELECT id FROM {table} WHERE id > %s ORDER BY id LIMIT %s",
+                (after_id, limit),
+            )]
+            rows = [r[0] for r in conn.execute(
+                f"SELECT to_jsonb(t) FROM {table} t WHERE t.id=ANY(%s) "
+                f"AND {eligible_sql(table)} ORDER BY t.id", (ids,),
+            )] if ids else []
             jobs = [r[0] for r in conn.execute(
                 "SELECT to_jsonb(j) FROM jobs j WHERE id=ANY(%s) ORDER BY id",
                 (list({r["job_id"] for r in rows}),),
             )] if rows else []
-        return {"source": actual, "table": table, "rows": rows, "jobs": jobs}
+        return {"source": actual, "table": table, "rows": rows, "jobs": jobs,
+                "next_after_id": max(ids) if ids else 0, "scan_complete": not ids}
     if action == "delete":
         rows = request["rows"]
         if not rows or len(rows) > 2000 or len({r["id"] for r in rows}) != len(rows):

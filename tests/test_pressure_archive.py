@@ -541,3 +541,124 @@ def test_reclaim_failure_preserves_timeout_classification_without_raw_stderr(mon
     with pytest.raises(RuntimeError) as error:
         pressure.reclaim_source({"table": "market_candles", "expected_source": {"system_id": "1", "database": "db"}, "max_table_bytes": 40})
     assert code in str(error.value) and "secret-value" not in str(error.value)
+
+
+def test_scan_cursor_is_scoped_to_source_and_advanced_atomically(monkeypatch, tmp_path):
+    monkeypatch.setattr(pressure, "STATE", tmp_path)
+    batch = {"source": {"system_id": "1"}, "table": "market_data", "next_after_id": 123}
+    pressure.advance_scan(batch)
+    calls = []
+    monkeypatch.setattr(pressure, "source", lambda request: calls.append(request) or {})
+    pressure.prepare_batch(batch["source"], batch["table"])
+    pressure.prepare_batch({"system_id": "2"}, batch["table"])
+    assert [call["after_id"] for call in calls] == [123, 0]
+
+
+def test_empty_protected_page_advances_without_deletion(pipeline, monkeypatch, tmp_path):
+    events, original = pipeline
+    monkeypatch.setattr(pressure, "MAX_BATCHES", 1)
+    def source(request):
+        if request["action"] == "prepare":
+            return {"source": {"database": "test"}, "table": request["table"],
+                    "rows": [], "next_after_id": 2000, "scan_complete": False}
+        return original(request)
+    monkeypatch.setattr(pressure, "source", source)
+    assert pressure.run(execute=True) == 0
+    assert "delete" not in events
+    assert json.loads((tmp_path / "scan-market_data.json").read_text())["after_id"] == 2000
+    state = json.loads((tmp_path / "pressure-status.json").read_text())
+    assert state["state"] == "partial" and not state.get("requires_attention")
+
+
+def test_retry_never_bypasses_unverified_failure(monkeypatch, tmp_path):
+    monkeypatch.setattr(pressure, "STATE", tmp_path)
+    monkeypatch.setattr(pressure, "disk_state", lambda: space())
+    (tmp_path / "pressure-status.json").write_text(json.dumps({
+        "requires_attention": True, "reason": "source rows changed or became protected"
+    }))
+    monkeypatch.setattr(pressure, "source", lambda _: pytest.fail("unsafe resume"))
+    assert pressure.run(execute=True, retry=True) == 1
+
+
+def test_worker_limits_candidates_before_retention_checks(monkeypatch):
+    from contextlib import nullcontext
+    calls = []
+    class Conn:
+        def transaction(self):
+            return nullcontext()
+        def execute(self, query, params=None):
+            calls.append((query, params))
+            if query.startswith("SELECT id FROM"):
+                return [(101,), (105,)]
+            return []
+    monkeypatch.setattr(worker, "identity", lambda _: {"system_id": "1"})
+    result = worker.dispatch(Conn(), {"action": "prepare", "table": "market_candles",
+                                     "expected_source": {"system_id": "1"}, "after_id": 100, "limit": 500})
+    candidate = next(c for c in calls if c[0].startswith("SELECT id FROM"))
+    assert candidate[1] == (100, 500)
+    check = next(c for c in calls if c[0].startswith("SELECT to_jsonb(t)"))
+    assert "t.id=ANY(%s)" in check[0] and check[1] == ([101, 105],)
+    assert result["next_after_id"] == 105 and not result["scan_complete"]
+
+
+def test_completed_empty_scan_reports_waiting_not_recovery(pipeline, monkeypatch, tmp_path):
+    _, original = pipeline
+    def source(request):
+        if request['action'] == 'prepare':
+            return {'source': {}, 'table': request['table'], 'rows': [],
+                    'next_after_id': 0, 'scan_complete': True}
+        return original(request)
+    monkeypatch.setattr(pressure, 'source', source)
+    assert pressure.run(execute=True) == 0
+    assert json.loads((tmp_path / 'pressure-status.json').read_text())['state'] == 'waiting_for_eligible_history'
+
+
+def test_pending_reclaim_survives_later_prepare_failure(pipeline, monkeypatch, tmp_path):
+    events, original = pipeline
+    count = 0
+    def source(request):
+        nonlocal count
+        if request['action'] == 'prepare':
+            count += 1
+            if count > 1:
+                raise RuntimeError('source prepare failed: QueryCanceled SQLSTATE=57014')
+        return original(request)
+    monkeypatch.setattr(pressure, 'source', source)
+    monkeypatch.setattr(sys, 'argv', ['pressure_archive.py', '--run'])
+    assert pressure.main() == 1
+    state = json.loads((tmp_path / 'pressure-status.json').read_text())
+    assert state['reclaim_required'] and state['requires_attention']
+    monkeypatch.setattr(pressure, 'source', original)
+    monkeypatch.setattr(pressure, 'require_archived_batch', lambda _: events.append('reverified'))
+    monkeypatch.setattr(pressure, 'require_reclaim_reserve', lambda _: None)
+    monkeypatch.setattr(pressure, 'postgres_relation', lambda _: {'table_bytes': pressure.GIB})
+    assert pressure.run(execute=True, retry=True) == 0
+    assert events.count('delete') == 1 and 'reverified' in events
+
+
+def test_reclaim_retry_zero_bytes_is_idempotent(monkeypatch, tmp_path):
+    monkeypatch.setattr(pressure, 'STATE', tmp_path)
+    monkeypatch.setattr(pressure, 'require_archived_batch', lambda _: None)
+    monkeypatch.setattr(pressure, 'postgres_relation', lambda _: {'table_bytes': 30})
+    monkeypatch.setattr(pressure, 'require_reclaim_reserve', lambda _: None)
+    monkeypatch.setattr(pressure, 'disk_state', lambda: space(55, .87))
+    monkeypatch.setattr(pressure, 'source', lambda _: {'relation_reclaimed_bytes': 0})
+    previous = {'table': 'market_data', 'batch_id': 'verified', 'sha256': 'a'*64}
+    assert pressure.resume_reclaim(previous, {'source': {}, 'table_bytes': {'market_data': 30}}, 0) == 0
+    assert not json.loads((tmp_path / 'pressure-status.json').read_text()).get('requires_attention')
+
+
+def test_completed_small_table_waits_for_other_table_across_runs(monkeypatch, tmp_path):
+    monkeypatch.setattr(pressure, 'STATE', tmp_path)
+    expected = {'system_id': '1'}
+    pressure.advance_scan({'source': expected, 'table': 'market_data',
+                           'next_after_id': 0, 'scan_complete': True})
+    pressure.advance_scan({'source': expected, 'table': 'market_candles',
+                           'next_after_id': 2000, 'scan_complete': False})
+    pressure.reset_completed_scan(expected)
+    monkeypatch.setattr(pressure, 'source', lambda _: pytest.fail('completed table rescanned'))
+    assert pressure.prepare_batch(expected, 'market_data')['scan_complete']
+    pressure.advance_scan({'source': expected, 'table': 'market_candles',
+                           'next_after_id': 0, 'scan_complete': True})
+    pressure.reset_completed_scan(expected)
+    assert not list(tmp_path.glob('scan-*.json'))

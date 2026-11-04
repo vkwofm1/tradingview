@@ -69,13 +69,42 @@ def source(request: dict) -> dict:
 
 
 def prepare_batch(expected: dict, table: str) -> dict:
-    request = {"action": "prepare", "expected_source": expected, "table": table}
+    cursor_path = STATE / f"scan-{table}.json"
+    cursor = json.loads(cursor_path.read_text()) if cursor_path.exists() else {}
+    if cursor.get("source") == expected and cursor.get("complete"):
+        return {"source": expected, "table": table, "rows": [],
+                "next_after_id": 0, "scan_complete": True}
+    after_id = cursor.get("after_id", 0) if cursor.get("source") == expected else 0
+    request = {"action": "prepare", "expected_source": expected, "table": table,
+               "after_id": after_id}
     try:
         return source(request)
     except RuntimeError as exc:
         if "QueryCanceled SQLSTATE=57014" not in str(exc):
             raise
     return source({**request, "limit": PREPARE_FALLBACK_LIMIT})
+
+
+def advance_scan(batch: dict) -> None:
+    """Advance only after verified deletion, or after an empty protected page."""
+    if "next_after_id" not in batch:
+        return
+    target = STATE / f"scan-{batch['table']}.json"
+    temporary = target.with_suffix(".tmp")
+    with temporary.open("w") as output:
+        json.dump({"source": batch["source"], "after_id": batch["next_after_id"],
+                   "complete": batch.get("scan_complete", False)}, output)
+        output.flush()
+        os.fsync(output.fileno())
+    temporary.replace(target)
+
+
+def reset_completed_scan(expected: dict) -> None:
+    paths = [STATE / f"scan-{table}.json" for table in TABLES]
+    cursors = [json.loads(path.read_text()) if path.exists() else {} for path in paths]
+    if all(cursor.get("source") == expected and cursor.get("complete") for cursor in cursors):
+        for path in paths:
+            path.unlink()
 
 
 def postgres_relation(table: str) -> dict:
@@ -240,6 +269,7 @@ def resume_reclaim(previous: dict, inspect: dict, rewrite_reserve: int) -> int:
     before = disk_state()
     save_state({**previous, "state": "reclaim_pending", "requires_attention": True,
                 "reason": "verified archive reclaim is in progress",
+                "reclaim_required": True,
                 "table_before_bytes": observed["table_bytes"],
                 "disk_before_free": before["free"]})
     result = source({
@@ -252,8 +282,8 @@ def resume_reclaim(previous: dict, inspect: dict, rewrite_reserve: int) -> int:
     archive.report("reclaimed_retry", table=table, disk_before=before, disk_after=after, **result)
     # Relation shrink is the direct evidence that VACUUM FULL returned source bytes.
     # Whole-filesystem free space can still fall while unrelated collectors write concurrently.
-    if result["relation_reclaimed_bytes"] <= 0:
-        raise RuntimeError("no measurable physical space reclaimed; further cleanup stopped")
+    # A confirmed successful rewrite can reclaim zero bytes after a crash before
+    # deletion or after an already-completed rewrite. It is safe to revisit rows.
     if recovered(after, rewrite_reserve):
         save_state({"state": "recovered", "source_deleted_rows": 0, "disk": after})
     else:
@@ -356,13 +386,24 @@ def run(*, execute: bool, retry: bool = False) -> int:
     current = disk_state()
     status_file = STATE / "pressure-status.json"
     previous = json.loads(status_file.read_text()) if status_file.exists() else {}
-    if previous.get("requires_attention") and not retry:
+    resumable = (
+        previous.get("reclaim_required", False)
+        or str(previous.get("reason", "")).startswith("source reclaim failed:")
+        or str(previous.get("reason", "")).startswith("archive SQL failed:")
+        or previous.get("reason") in (
+            "interrupted batch must be reconciled before retry",
+            "verified archive reclaim is in progress",
+        )
+    )
+    if previous.get("requires_attention") and not (retry and resumable):
         archive.report("requires_attention", reason=previous.get("reason"), disk=current)
         return 1
     # Cheap relation-size metadata prevents large future tables from exhausting rewrite headroom
     # before a fixed free-space threshold would ever trigger. No source rows or D are read here.
     inspect = source({"action": "inspect"})
     expected = inspect["source"]
+    if execute:
+        reset_completed_scan(expected)
     budgets = {t: int(size * 1.1) + GIB for t, size in inspect["table_bytes"].items()}
     rewrite_reserve = max(budgets.values()) * 2 + 20 * GIB
     thresholds = {"trigger_free_bytes": max(60 * GIB, rewrite_reserve + 20 * GIB),
@@ -371,11 +412,7 @@ def run(*, execute: bool, retry: bool = False) -> int:
         execute
         and retry
         and previous.get("requires_attention")
-        and (
-            str(previous.get("reason", "")).startswith("source reclaim failed:")
-            or str(previous.get("reason", "")).startswith("archive SQL failed:")
-            or previous.get("reason") == "interrupted batch must be reconciled before retry"
-        )
+        and resumable
     ):
         require_backing_filesystem(expected)
         initialize_sink(expected)
@@ -396,6 +433,8 @@ def run(*, execute: bool, retry: bool = False) -> int:
     require_reserves(max(budgets.values()))
     initialize_sink(expected)
     total_deleted = 0
+    scanned = False
+    completed_scans = set()
     for table in TABLES:
         table_deleted = 0
         for _ in range(MAX_BATCHES):
@@ -403,8 +442,14 @@ def run(*, execute: bool, retry: bool = False) -> int:
                 break
             require_reserves(budgets[table])
             batch = prepare_batch(expected, table)
+            scanned = scanned or "next_after_id" in batch
             if not batch["rows"]:
-                break
+                advance_scan(batch)
+                if batch.get("scan_complete", True):
+                    if "next_after_id" in batch:
+                        completed_scans.add(table)
+                    break
+                continue
             batch_id, digest = persist_and_verify(batch)
             require_reserves(budgets[table])
             if recovered(disk_state(), rewrite_reserve):
@@ -412,15 +457,18 @@ def run(*, execute: bool, retry: bool = False) -> int:
             # A durable intent is written before deletion: interrupted/ambiguous operations latch.
             save_state({"state": "deletion_pending", "requires_attention": True,
                         "reason": "interrupted batch must be reconciled before retry",
+                        "reclaim_required": True,
                         "batch_id": batch_id, "sha256": digest, "table": table})
             result = source({"action": "delete", "expected_source": expected,
                              "table": table, "rows": batch["rows"]})
             count = len(result["deleted_ids"])
             table_deleted += count
             total_deleted += count
-            archive.report("batch_archived", batch_id=batch_id, **result)
+            archive.report("batch_archived", batch_id=batch_id, deleted_rows=count,
+                           skipped_changed_or_protected=result["skipped_changed_or_protected"])
             if result["skipped_changed_or_protected"]:
                 raise RuntimeError("source rows changed or became protected; archived snapshot preserved")
+            advance_scan(batch)
         if table_deleted:
             require_reserves(budgets[table])
             before = disk_state()
@@ -441,7 +489,12 @@ def run(*, execute: bool, retry: bool = False) -> int:
         if recovered(disk_state(), rewrite_reserve):
             save_state({"state": "recovered", "source_deleted_rows": total_deleted, "disk": disk_state()})
             return 0
-    if total_deleted:
+    if not total_deleted and completed_scans == set(TABLES):
+        save_state({"state": "waiting_for_eligible_history", "pressure_active": True,
+                    "source_deleted_rows": 0, "disk": disk_state(),
+                    "reason": "scan completed without eligible rows; protected history retained"})
+        return 0
+    if total_deleted or scanned:
         # Resume bounded work next tick only when each rewrite actually returned physical space.
         save_state({"state": "partial", "pressure_active": True,
                     "source_deleted_rows": total_deleted, "disk": disk_state()})
@@ -471,8 +524,12 @@ def main() -> int:
             previous_path = STATE / "pressure-status.json"
             previous = json.loads(previous_path.read_text()) if previous_path.exists() else {}
             uncertain = bool(previous.get("requires_attention"))
+            recovery_pending = previous.get("reclaim_required", False)
+            if "source rows changed or became protected" in str(exc):
+                recovery_pending = False
             save_state({**previous, "state": "failed" if uncertain else "retry_wait",
-                        "requires_attention": uncertain, "reason": str(exc)})
+                        "requires_attention": uncertain, "reclaim_required": recovery_pending,
+                        "reason": str(exc)})
             return 1
 
 
